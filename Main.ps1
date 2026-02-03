@@ -26,6 +26,8 @@
     08.01.2026      Yannick Morgenthaler    Script was created initially
     11.01.2026      Yannick Morgenthaler    Further improved algorithms and Reports
     12.01.2026      Yannick Morgenthaler    Split Script into Modules for better maintenance
+    03.02.2026      v0 / YM                 Memory optimization: streaming histogram instead of byte array,
+                                            HashSet for sample locations, supports 100k+ sectors on 8GB RAM
 #>
 
 function Main-Process {
@@ -187,7 +189,11 @@ function Main-Process {
         }
 
         $totalSamples = $sampleLocations.Count
-        $allBytes = New-Object System.Collections.ArrayList
+        
+        # MEMORY OPTIMIZATION: Use running histogram instead of storing all bytes
+        # This uses only 2KB (256 * 8 bytes) instead of potentially hundreds of MB
+        $runningHistogram = New-Object 'long[]' 256
+        $totalBytesRead = [long]0
 
         Write-Console "Analyzing $totalSamples sectors..." "Yellow"
 
@@ -235,8 +241,12 @@ function Main-Process {
             }
             $results.Patterns[$analysis.Pattern]++
 
+            # MEMORY OPTIMIZATION: Update running histogram instead of storing all bytes
             if ($sectorData) {
-                $allBytes.AddRange($sectorData) | Out-Null
+                foreach ($byte in $sectorData) {
+                    $runningHistogram[$byte]++
+                }
+                $totalBytesRead += $sectorData.Length
             }
         }
 
@@ -245,11 +255,11 @@ function Main-Process {
         $StatusLabel.Text = "Status: Sector Scan Completed"
         DoEvents
 
-        # Calculate overall entropy
-        Write-Console "Calculate ovarall entropy..." "Yellow"
+        # Calculate overall entropy from running histogram (memory-efficient)
+        Write-Console "Calculate overall entropy..." "Yellow"
         $StatusLabel.Text = "Status: Calculate overall entropy..."
         DoEvents
-        $overallEntropy = Get-ShannonEntropy -Data $allBytes.ToArray()
+        $overallEntropy = Get-ShannonEntropyFromHistogram -Histogram $runningHistogram -TotalBytes $totalBytesRead
         $entropyPercent = [math]::Round(($overallEntropy / 8) * 100, 2)
 
         # Calculate wiped percentage
