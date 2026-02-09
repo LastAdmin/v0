@@ -28,6 +28,8 @@
     12.01.2026      Yannick Morgenthaler    Split Script into Modules for better maintenance
     03.02.2026      v0 / YM                 Memory optimization: streaming histogram instead of byte array,
                                             HashSet for sample locations, supports 100k+ sectors on 8GB RAM
+    09.02.2026      v0 / YM                 Added Get-DataLeftoverMarkers module: flags sectors with potential
+                                            data remnants, stores hex/ASCII previews, adds report section
 #>
 
 function Main-Process {
@@ -92,6 +94,7 @@ function Main-Process {
             . .\Modules\Get-PrintableAsciiRatio.ps1
             . .\Modules\Test-SectorWiped.ps1
             . .\Modules\Get-ByteHistogram.ps1
+            . .\Modules\Get-DataLeftoverMarkers.ps1
             . .\Modules\New-HtmlReport.ps1
             . .\Modules\Convert-HtmlToPdf.ps1
             Write-Console "Modules Successfully Loaded!" "SpringGreen"
@@ -195,6 +198,10 @@ function Main-Process {
         $runningHistogram = New-Object 'long[]' 256
         $totalBytesRead = [long]0
 
+        # Data leftover collection for flagged sectors (NOT Wiped / Suspicious)
+        # Stores up to 500 individual markers with hex previews for the report
+        $dataLeftovers = New-DataLeftoverCollection -MaxMarkers 500
+
         Write-Console "Analyzing $totalSamples sectors..." "Yellow"
 
         $progress = 0
@@ -240,6 +247,13 @@ function Main-Process {
                 $results.Patterns[$analysis.Pattern] = 0
             }
             $results.Patterns[$analysis.Pattern]++
+
+            # Collect data leftover markers for NOT Wiped and Suspicious sectors
+            if ($sectorData -and ($analysis.Status -eq "NOT Wiped" -or $analysis.Status -eq "Suspicious")) {
+                $marker = Get-DataLeftoverMarker -SectorNumber $sectorNum -SectorSize $SectorSize `
+                    -AnalysisResult $analysis -SectorData $sectorData
+                Add-DataLeftoverMarker -Collection $dataLeftovers -Marker $marker
+            }
 
             # MEMORY OPTIMIZATION: Update running histogram instead of storing all bytes
             if ($sectorData) {
@@ -309,6 +323,23 @@ function Main-Process {
             Write-Console "  $($pattern.Key): $($pattern.Value) sectors" "Info"
         }
 
+        # Data Leftover Summary
+        $leftoverTotal = $dataLeftovers.Summary.TotalNotWiped + $dataLeftovers.Summary.TotalSuspicious
+        if ($leftoverTotal -gt 0) {
+            Write-Console "" "Info"
+            Write-Console "Data Leftover Markers:" $(if($leftoverTotal -gt 0){"Red"}else{"SpringGreen"})
+            Write-Console "  NOT Wiped sectors   : $($dataLeftovers.Summary.TotalNotWiped)" "Red"
+            Write-Console "  Suspicious sectors  : $($dataLeftovers.Summary.TotalSuspicious)" "Yellow"
+            Write-Console "  Markers stored      : $($dataLeftovers.Markers.Count)" "Info"
+            if ($dataLeftovers.OverflowCount -gt 0) {
+                Write-Console "  Overflow (not stored): $($dataLeftovers.OverflowCount)" "Orange"
+            }
+            Write-Console "  >> See report for sector addresses and hex previews <<" "Yellow"
+        } else {
+            Write-Console "" "Info"
+            Write-Console "Data Leftover Markers: None - All sampled sectors are clean!" "SpringGreen"
+        }
+
         # Generate Reports
         Write-Console "_____________________________________________________" "Gray"
         Write-Console "Generating Report(s)..." "Yellow"
@@ -317,7 +348,8 @@ function Main-Process {
 
         $htmlContent = New-HtmlReport -Technician $Technician -Results $results -Disk $disk -DiskNumber $DiskNumber `
     -DiskSize $diskSize -TotalSamples $totalSamples -WipedPercent $wipedPercent `
-    -EntropyPercent $entropyPercent -OverallStatus $overallStatus -SectorSize $SectorSize
+    -EntropyPercent $entropyPercent -OverallStatus $overallStatus -SectorSize $SectorSize `
+    -DataLeftovers $dataLeftovers
 
         $htmlPath = "$ReportFile.html"
         $pdfPath = "$ReportFile.pdf"

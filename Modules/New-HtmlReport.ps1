@@ -9,7 +9,8 @@ function New-HtmlReport {
         [double]$WipedPercent,
         [double]$EntropyPercent,
         [string]$OverallStatus,
-        [int]$SectorSize
+        [int]$SectorSize,
+        [hashtable]$DataLeftovers = $null
     )
 
     $statusClass = if ($OverallStatus -eq "VERIFIED*") {
@@ -181,6 +182,80 @@ function New-HtmlReport {
             page-break-before: always;
             margin-top: 40px;
         }
+        .leftover-warning {
+            background: #fff3cd;
+            color: #856404;
+            padding: 12px 15px;
+            border-radius: 5px;
+            border-left: 5px solid #ffc107;
+            margin-bottom: 15px;
+            font-size: 10pt;
+        }
+        .leftover-clean {
+            background: #d4edda;
+            color: #155724;
+            padding: 12px 15px;
+            border-radius: 5px;
+            border-left: 5px solid #28a745;
+            margin-bottom: 15px;
+            font-size: 10pt;
+        }
+        .hex-preview {
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 8.5pt;
+            background: #f0f0f0;
+            padding: 2px 4px;
+            border-radius: 2px;
+            word-break: break-all;
+        }
+        .ascii-preview {
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 8.5pt;
+            color: #555;
+        }
+        .status-tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 9pt;
+            font-weight: 600;
+        }
+        .status-tag-notwipe {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status-tag-suspicious {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .leftover-table th, .leftover-table td {
+            font-size: 9pt;
+            padding: 6px 8px;
+            vertical-align: top;
+        }
+        .leftover-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            margin: 12px 0 20px 0;
+        }
+        .leftover-summary-card {
+            background: #fff8e1;
+            padding: 14px;
+            border-radius: 5px;
+            text-align: center;
+            border: 1px solid #ffe082;
+        }
+        .leftover-summary-card .metric {
+            font-size: 24px;
+            font-weight: bold;
+            color: #e65100;
+        }
+        .leftover-summary-card .card-label {
+            font-size: 9pt;
+            color: #6d4c00;
+            margin-top: 4px;
+        }
     </style>
 </head>
 <body>
@@ -253,6 +328,99 @@ function New-HtmlReport {
         </div>
 
         <div class="section-spacer"></div>
+
+        $(if ($DataLeftovers) {
+            $leftoverTotal = $DataLeftovers.Summary.TotalNotWiped + $DataLeftovers.Summary.TotalSuspicious
+            $leftoverHtml = @"
+        <div class="page-break"></div>
+        <div class="no-break">
+            <h2>Data Leftover Markers - Manual Review Required</h2>
+"@
+            if ($leftoverTotal -eq 0) {
+                $leftoverHtml += @"
+            <div class="leftover-clean">
+                <strong>No data leftovers detected.</strong> All sampled sectors matched known wipe patterns.
+            </div>
+"@
+            } else {
+                $leftoverHtml += @"
+            <div class="leftover-warning">
+                <strong>$leftoverTotal sector(s) flagged</strong> as containing potential data remnants.
+                The addresses and byte previews below should be reviewed manually to determine if sensitive data is recoverable.
+            </div>
+
+            <div class="leftover-summary-grid">
+                <div class="leftover-summary-card">
+                    <div class="metric">$($DataLeftovers.Summary.TotalNotWiped)</div>
+                    <div class="card-label">NOT Wiped Sectors</div>
+                </div>
+                <div class="leftover-summary-card">
+                    <div class="metric">$($DataLeftovers.Summary.TotalSuspicious)</div>
+                    <div class="card-label">Suspicious Sectors</div>
+                </div>
+                <div class="leftover-summary-card">
+                    <div class="metric">$($DataLeftovers.Markers.Count)$(if($DataLeftovers.OverflowCount -gt 0){" / $leftoverTotal"})</div>
+                    <div class="card-label">Markers Stored$(if($DataLeftovers.OverflowCount -gt 0){" / Total"})</div>
+                </div>
+            </div>
+"@
+                if ($DataLeftovers.OverflowCount -gt 0) {
+                    $leftoverHtml += @"
+            <p style="font-size: 9pt; color: #856404;"><em>Note: $($DataLeftovers.OverflowCount) additional marker(s) were not stored to limit report size. The summary counts above reflect all flagged sectors.</em></p>
+"@
+                }
+
+                # Pattern breakdown sub-table
+                $leftoverHtml += @"
+            <h3 style="font-size: 11pt; margin-top: 18px;">Leftover Pattern Breakdown</h3>
+            <table style="width: 60%; margin-bottom: 20px;">
+                <tr><th>Pattern</th><th>Count</th></tr>
+"@
+                foreach ($p in $DataLeftovers.Summary.PatternCounts.GetEnumerator() | Sort-Object -Property Value -Descending) {
+                    $leftoverHtml += "                <tr><td>$($p.Key)</td><td>$($p.Value)</td></tr>`n"
+                }
+                $leftoverHtml += "            </table>`n"
+
+                # Individual marker table
+                $leftoverHtml += @"
+        </div>
+
+        <div class="no-break">
+            <h3 style="font-size: 11pt; margin-top: 10px;">Flagged Sector Details</h3>
+            <table class="leftover-table">
+                <tr>
+                    <th style="width:7%">Sector</th>
+                    <th style="width:10%">Byte Offset</th>
+                    <th style="width:9%">Status</th>
+                    <th style="width:17%">Pattern</th>
+                    <th style="width:5%">Conf.</th>
+                    <th style="width:26%">Hex Preview (first 32 bytes)</th>
+                    <th style="width:13%">ASCII Preview</th>
+                    <th style="width:13%">Details</th>
+                </tr>
+"@
+                foreach ($m in $DataLeftovers.Markers) {
+                    $tagClass = if ($m.Status -eq "NOT Wiped") { "status-tag-notwipe" } else { "status-tag-suspicious" }
+                    $leftoverHtml += @"
+                <tr>
+                    <td>$($m.SectorNumber.ToString('N0'))</td>
+                    <td><code>$($m.ByteOffset)</code></td>
+                    <td><span class="status-tag $tagClass">$($m.Status)</span></td>
+                    <td>$($m.Pattern)</td>
+                    <td>$($m.Confidence)%</td>
+                    <td><span class="hex-preview">$($m.HexPreview)</span></td>
+                    <td><span class="ascii-preview">$($m.AsciiPreview)</span></td>
+                    <td style="font-size: 8.5pt;">$($m.Details)</td>
+                </tr>
+"@
+                }
+                $leftoverHtml += "            </table>`n"
+            }
+
+            $leftoverHtml += "        </div>`n"
+            $leftoverHtml += "        <div class=`"section-spacer`"></div>`n"
+            $leftoverHtml
+        })
 
         <div class="no-break">
             <h2>Verification Methodology</h2>

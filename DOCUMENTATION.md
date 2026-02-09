@@ -6,12 +6,13 @@
 2. [Architecture](#architecture)
 3. [File Structure](#file-structure)
 4. [Core Modules](#core-modules)
-5. [Analysis Algorithms](#analysis-algorithms)
-6. [GUI Components](#gui-components)
-7. [Data Flow](#data-flow)
-8. [Memory Management](#memory-management)
-9. [Customization Guide](#customization-guide)
-10. [Troubleshooting](#troubleshooting)
+5. [Data Leftover Markers Module](#data-leftover-markers-module)
+6. [Analysis Algorithms](#analysis-algorithms)
+7. [GUI Components](#gui-components)
+8. [Data Flow](#data-flow)
+9. [Memory Management](#memory-management)
+10. [Customization Guide](#customization-guide)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -101,6 +102,7 @@ DiskWipeVerification/
 │   ├── Get-ShannonEntropy.ps1       # Entropy calculation
 │   ├── Get-ByteDistributionScore.ps1# Chi-square distribution test
 │   ├── Get-ByteHistogram.ps1        # Byte frequency histogram
+│   ├── Get-DataLeftoverMarkers.ps1  # Data leftover flagging & collection
 │   ├── Get-PrintableAsciiRatio.ps1  # ASCII content detector
 │   ├── Test-FileSignatures.ps1      # File magic number detection
 │   ├── Test-SectorWiped.ps1         # Main sector analysis
@@ -611,6 +613,246 @@ if ($asciiRatio -gt 0.7) {  # Default: 0.7, higher = stricter text detection
 
 ---
 
+## Data Leftover Markers Module
+
+### Overview
+
+**File:** `Modules/Get-DataLeftoverMarkers.ps1`
+
+This module provides the ability to flag, record, and report on sectors that contain potential data remnants. During the scan, any sector classified as **"NOT Wiped"** or **"Suspicious"** by `Test-SectorWiped` is passed to this module, which creates a lightweight marker containing the sector address, analysis details, and a short hex/ASCII preview of the raw data. These markers are collected into a capped collection and ultimately rendered into a dedicated section of the HTML/PDF report for manual forensic review.
+
+### Functions
+
+#### `Get-DataLeftoverMarker`
+
+Creates a single marker object for a flagged sector.
+
+```powershell
+$marker = Get-DataLeftoverMarker -SectorNumber 4096 -SectorSize 512 `
+    -AnalysisResult $analysis -SectorData $sectorData
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `SectorNumber` | long | Logical sector index on the disk |
+| `SectorSize` | int | Sector size in bytes (512 or 4096) |
+| `AnalysisResult` | hashtable | The result hashtable from `Test-SectorWiped` |
+| `SectorData` | byte[] | Raw sector byte array |
+
+**Returns:** Hashtable with the following keys:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `SectorNumber` | long | Logical sector index |
+| `ByteOffset` | string | Hex-formatted byte offset (e.g., `"0x00200000"`) |
+| `ByteOffsetDec` | long | Decimal byte offset |
+| `Status` | string | `"NOT Wiped"` or `"Suspicious"` |
+| `Pattern` | string | Detected pattern (e.g., `"File signature: PDF"`) |
+| `Confidence` | int | Confidence percentage (0-100) |
+| `Details` | string | Analysis detail string |
+| `HexPreview` | string | First 32 bytes in hex, space-separated (e.g., `"25 50 44 46 2D 31 2E 34 ..."`) |
+| `AsciiPreview` | string | First 32 bytes as printable ASCII, non-printable replaced with `.` |
+
+**Memory note:** Only the first 32 bytes of the sector are stored in the marker. The full `$SectorData` array is NOT retained, keeping each marker at approximately 500 bytes of memory.
+
+**Hex preview construction:**
+
+```
+Sector data (512 bytes):  [25] [50] [44] [46] [2D] [31] [2E] [34] ... [00] [00]
+                           │    │    │    │    │    │    │    │
+                           ▼    ▼    ▼    ▼    ▼    ▼    ▼    ▼
+HexPreview (32 bytes max): "25  50   44   46   2D   31   2E   34  ..."
+AsciiPreview:              "%    P    D    F    -    1    .    4   ..."
+```
+
+---
+
+#### `New-DataLeftoverCollection`
+
+Creates an empty, capped collection to hold markers during the scan.
+
+```powershell
+$leftovers = New-DataLeftoverCollection -MaxMarkers 500
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `MaxMarkers` | int | 500 | Maximum number of individual markers to store |
+
+**Returns:** Hashtable with the following structure:
+
+```powershell
+@{
+    Markers       = [System.Collections.Generic.List[hashtable]]  # Stored markers
+    MaxMarkers    = 500                                           # Cap
+    OverflowCount = 0                                             # Dropped markers
+    Summary       = @{
+        TotalNotWiped   = 0          # Total "NOT Wiped" sectors (always accurate)
+        TotalSuspicious = 0          # Total "Suspicious" sectors (always accurate)
+        PatternCounts   = @{}        # Pattern -> count mapping (always accurate)
+    }
+}
+```
+
+**Key design decisions:**
+
+- `Markers` uses `List[hashtable]` (not `ArrayList`) for type safety and memory efficiency.
+- `Summary` statistics are **always** updated, even when the marker cap is exceeded. This means the summary counts are accurate even if individual markers are dropped.
+- The default cap of 500 was chosen to keep the report manageable (each marker row adds ~200 bytes of HTML).
+
+---
+
+#### `Add-DataLeftoverMarker`
+
+Adds a marker to the collection, respecting the cap.
+
+```powershell
+Add-DataLeftoverMarker -Collection $leftovers -Marker $marker
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `Collection` | hashtable | The collection from `New-DataLeftoverCollection` |
+| `Marker` | hashtable | A marker from `Get-DataLeftoverMarker` |
+
+**Behavior:**
+
+```
+                    ┌──────────────────────┐
+                    │  Add-DataLeftoverMarker│
+                    └──────────┬───────────┘
+                               │
+                    ┌──────────▼───────────┐
+                    │ Update Summary stats │  (always runs)
+                    │  - Increment status  │
+                    │  - Increment pattern │
+                    └──────────┬───────────┘
+                               │
+                    ┌──────────▼───────────┐
+                    │ Markers.Count <      │
+                    │ MaxMarkers?          │
+                    └──────┬───────┬───────┘
+                      Yes  │       │  No
+                           ▼       ▼
+                    ┌──────────┐ ┌──────────────┐
+                    │ Add to   │ │ Increment    │
+                    │ Markers  │ │ OverflowCount│
+                    └──────────┘ └──────────────┘
+```
+
+---
+
+### Integration in Main.ps1
+
+The module is integrated into the scan loop in three places:
+
+**1. Initialization (before scan loop):**
+
+```powershell
+$dataLeftovers = New-DataLeftoverCollection -MaxMarkers 500
+```
+
+**2. Inside the scan loop (after `Test-SectorWiped`):**
+
+```powershell
+if ($sectorData -and ($analysis.Status -eq "NOT Wiped" -or $analysis.Status -eq "Suspicious")) {
+    $marker = Get-DataLeftoverMarker -SectorNumber $sectorNum -SectorSize $SectorSize `
+        -AnalysisResult $analysis -SectorData $sectorData
+    Add-DataLeftoverMarker -Collection $dataLeftovers -Marker $marker
+}
+```
+
+**3. Report generation (passed as parameter):**
+
+```powershell
+$htmlContent = New-HtmlReport ... -DataLeftovers $dataLeftovers
+```
+
+---
+
+### Report Output
+
+The HTML report includes a dedicated **"Data Leftover Markers - Manual Review Required"** section containing:
+
+1. **Status banner** - Green "no leftovers" banner or amber warning with total flagged count
+2. **Summary cards** - Three cards showing NOT Wiped count, Suspicious count, and stored marker count
+3. **Pattern breakdown table** - Which leftover patterns were detected and how often
+4. **Flagged sector detail table** - Every stored marker with columns for:
+   - Sector number
+   - Byte offset (hex)
+   - Status tag (color-coded)
+   - Pattern
+   - Confidence %
+   - Hex preview (monospace, first 32 bytes)
+   - ASCII preview (monospace, first 32 bytes)
+   - Analysis details
+
+If the marker cap was exceeded, a note is displayed explaining how many additional markers were dropped and that the summary statistics still cover all flagged sectors.
+
+---
+
+### Customization
+
+**Adjusting the marker cap:**
+
+```powershell
+# In Main.ps1, change the MaxMarkers parameter:
+$dataLeftovers = New-DataLeftoverCollection -MaxMarkers 1000  # Store more detail
+$dataLeftovers = New-DataLeftoverCollection -MaxMarkers 100   # Lighter report
+```
+
+**Changing the hex preview length:**
+
+```powershell
+# In Get-DataLeftoverMarkers.ps1, Get-DataLeftoverMarker function:
+$previewLength = [math]::Min(64, $SectorData.Length)  # Show 64 bytes instead of 32
+```
+
+**Adding additional fields to markers:**
+
+```powershell
+# In Get-DataLeftoverMarker, add to the return hashtable:
+return @{
+    # ... existing fields ...
+    Entropy = (Get-ShannonEntropy -Data $SectorData)  # Per-sector entropy
+    DiskRegion = if ($SectorNumber -lt 100) { "Start" }
+                 elseif ($SectorNumber -gt ($TotalSectors - 100)) { "End" }
+                 else { "Middle" }
+}
+```
+
+Then update the HTML table in `New-HtmlReport.ps1` to add matching `<th>` and `<td>` columns.
+
+**Filtering which statuses get markers:**
+
+```powershell
+# In Main.ps1, adjust the condition to only flag "NOT Wiped" (ignore Suspicious):
+if ($sectorData -and $analysis.Status -eq "NOT Wiped") {
+    # ... create marker ...
+}
+```
+
+---
+
+### Memory Impact
+
+| Scenario | Markers Stored | Approximate Memory |
+|----------|---------------|-------------------|
+| Clean disk (0 leftovers) | 0 | ~0.5 KB (empty collection) |
+| Mostly clean (50 leftovers) | 50 | ~25 KB |
+| Maximum cap reached (500 stored) | 500 | ~250 KB |
+| Heavily non-wiped disk (10,000 flagged) | 500 (capped) | ~250 KB + summary stats |
+
+The module adds negligible memory overhead regardless of how many sectors are flagged, thanks to the cap and the fact that only 32 bytes per sector are stored in each marker.
+
+---
+
 ## Analysis Algorithms
 
 ### Wipe Verification Algorithm
@@ -728,7 +970,7 @@ MainWindow (Form)
 ┌───────────────┐     ┌───────────────┐
 │ Validate      │────▶│ Show Warning  │
 │ Inputs        │ No  │ Dialog        │
-└───────┬───────┘     └───────────────┘
+└───────┬─��─────┘     └───────────────┘
         │ Yes
         ▼
 ┌───────────────┐
@@ -773,9 +1015,11 @@ MainWindow (Form)
 │  │   1. Read-DiskSector            │  │
 │  │   2. Test-SectorWiped           │  │
 │  │   3. Update results             │  │
-│  │   4. Update histogram           │  │
-│  │   5. Update UI progress         │  │
-│  │   6. Check cancel flag          │  │
+│  │   4. Collect leftover marker    │  │
+│  │      (if NOT Wiped/Suspicious)  │  │
+│  │   5. Update histogram           │  │
+│  │   6. Update UI progress         │  │
+│  │   7. Check cancel flag          │  │
 │  └─────────────────────────────────┘  │
 └───────────────┬───────────────────────┘
                 │
@@ -828,6 +1072,37 @@ $results = @{
     Unreadable = 0          # Count of unreadable sectors
     Patterns   = @{}        # Pattern -> Count mapping
     Details    = @()        # Array of detailed results (unused for memory optimization)
+}
+```
+
+#### Data Leftover Collection
+
+```powershell
+$dataLeftovers = @{
+    Markers       = [List[hashtable]]    # Up to MaxMarkers individual marker objects
+    MaxMarkers    = 500                  # Cap to prevent unbounded growth
+    OverflowCount = 0                    # Number of markers dropped beyond cap
+    Summary       = @{
+        TotalNotWiped   = 0              # Always accurate count
+        TotalSuspicious = 0              # Always accurate count
+        PatternCounts   = @{}            # Pattern -> count (always accurate)
+    }
+}
+```
+
+#### Individual Marker
+
+```powershell
+$marker = @{
+    SectorNumber  = [long]    # e.g., 4096
+    ByteOffset    = [string]  # e.g., "0x00200000"
+    ByteOffsetDec = [long]    # e.g., 2097152
+    Status        = [string]  # "NOT Wiped" or "Suspicious"
+    Pattern       = [string]  # e.g., "File signature: PDF"
+    Confidence    = [int]     # 0-100
+    Details       = [string]  # Analysis details
+    HexPreview    = [string]  # "25 50 44 46 2D ..." (first 32 bytes)
+    AsciiPreview  = [string]  # "%PDF-..." (first 32 bytes)
 }
 ```
 
@@ -1129,6 +1404,7 @@ Write-Console "Elapsed: $($stopwatch.Elapsed.TotalSeconds) seconds" "Cyan"
 | 3.8.0116.02 | 2026-01-11 | Improved algorithms and reports |
 | 3.8.0116.03 | 2026-01-12 | Modular architecture |
 | 3.8.0203.01 | 2026-02-03 | Memory optimization for large samples |
+| 3.9.0209.01 | 2026-02-09 | Data leftover markers module with report integration |
 
 ---
 

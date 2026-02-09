@@ -7,8 +7,9 @@ A PowerShell-based GUI application for verifying complete data sanitization on d
 - **DoD 5220.22-M Compatible** - Detects standard military wipe patterns including random final pass
 - **Shannon Entropy Analysis** - Calculates data randomness to verify cryptographic wipes
 - **File Signature Detection** - Identifies recoverable data by detecting common file headers (PDF, ZIP, JPEG, PNG, etc.)
+- **Data Leftover Markers** - Flags and records sector addresses where potential data remnants are found, with hex/ASCII previews for manual forensic review
 - **Low Memory Footprint** - Optimized to handle 100,000+ sector samples on systems with only 8GB RAM
-- **Detailed Reports** - Generates HTML and PDF reports with comprehensive analysis results
+- **Detailed Reports** - Generates HTML and PDF reports with comprehensive analysis results, including a dedicated data leftover section
 - **GUI Interface** - User-friendly Windows Forms interface for easy operation
 
 ## Requirements
@@ -92,17 +93,18 @@ Or use the compiled executable:
 │   └── NewElements/             # Component factories
 │
 └── Modules/                     # Analysis modules
-    ├── Get-AvailableDisks.ps1   # Disk enumeration
-    ├── Get-ByteDistributionScore.ps1  # Chi-square distribution test
-    ├── Get-ByteHistogram.ps1    # Byte frequency histogram
-    ├── Get-PrintableAsciiRatio.ps1    # ASCII content detection
-    ├── Get-SampleLocations.ps1  # Sector sampling algorithm
-    ├── Get-ShannonEntropy.ps1   # Entropy calculation
-    ├── Read-DiskSector.ps1      # Raw disk I/O
-    ├── Test-FileSignatures.ps1  # File header detection
-    ├── Test-SectorWiped.ps1     # Wipe pattern analysis
-    ├── New-HtmlReport.ps1       # Report generation
-    └── Convert-HtmlToPdf.ps1    # PDF conversion
+    ├── Get-AvailableDisks.ps1        # Disk enumeration
+    ├── Get-ByteDistributionScore.ps1 # Chi-square distribution test
+    ├── Get-ByteHistogram.ps1         # Byte frequency histogram
+    ├── Get-DataLeftoverMarkers.ps1   # Data leftover flagging & collection
+    ├── Get-PrintableAsciiRatio.ps1   # ASCII content detection
+    ├── Get-SampleLocations.ps1       # Sector sampling algorithm
+    ├── Get-ShannonEntropy.ps1        # Entropy calculation
+    ├── Read-DiskSector.ps1           # Raw disk I/O
+    ├── Test-FileSignatures.ps1       # File header detection
+    ├── Test-SectorWiped.ps1          # Wipe pattern analysis
+    ├── New-HtmlReport.ps1            # Report generation
+    └── Convert-HtmlToPdf.ps1         # PDF conversion
 ```
 
 ## Technical Details
@@ -165,6 +167,33 @@ The tool checks for these file headers to identify recoverable data:
 | NTFS | Boot sector | 7 |
 | EXE | `MZ..` | 4 |
 
+## Data Leftover Markers
+
+When the scan encounters sectors classified as **NOT Wiped** or **Suspicious**, the tool creates a **data leftover marker** for each one. These markers are collected during the scan and included as a dedicated section in the HTML/PDF report.
+
+### What is stored per marker
+
+| Field | Description |
+|-------|-------------|
+| **Sector Number** | Logical sector index on the disk |
+| **Byte Offset** | Hex and decimal byte offset (e.g., `0x0000FA00`) |
+| **Status** | `NOT Wiped` or `Suspicious` |
+| **Pattern** | What was detected (e.g., "File signature: PDF", "Text content detected") |
+| **Confidence** | Analysis confidence percentage |
+| **Hex Preview** | First 32 bytes in hex for manual inspection |
+| **ASCII Preview** | First 32 bytes as printable ASCII (non-printable shown as `.`) |
+
+### Report section
+
+The report includes:
+- A summary showing how many sectors were flagged (NOT Wiped vs. Suspicious)
+- A pattern breakdown table showing which leftover types were found
+- A detailed table listing each flagged sector with its address, hex preview, and ASCII preview
+
+### Memory safeguard
+
+The collection is capped at **500 markers** by default. If more than 500 sectors are flagged, the summary counts still reflect all of them but individual marker details are only stored for the first 500. The overflow count is noted in the report.
+
 ## Troubleshooting
 
 ### "Access Denied" Error
@@ -194,6 +223,7 @@ The tool checks for these file headers to identify recoverable data:
 | 3.8.0116.02 | 2026-01-11 | Improved algorithms and reports |
 | 3.8.0116.03 | 2026-01-12 | Modular architecture |
 | 3.9.0203.01 | 2026-02-03 | Memory optimization for large sample sizes |
+| 3.9.0209.01 | 2026-02-09 | Data leftover markers module, report section for manual review |
 
 ## Author
 
