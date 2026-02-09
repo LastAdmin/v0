@@ -30,6 +30,8 @@
                                             HashSet for sample locations, supports 100k+ sectors on 8GB RAM
     09.02.2026      v0 / YM                 Added Get-DataLeftoverMarkers module: flags sectors with potential
                                             data remnants, stores hex/ASCII previews, adds report section
+    09.02.2026      v0 / YM                 Fixed critical memory crash: streaming iterator for full-disk scans,
+                                            shared FileStream, eliminated array-limit errors on large sample sizes
 #>
 
 function Main-Process {
@@ -188,7 +190,6 @@ function Main-Process {
             Suspicious = 0
             Unreadable = 0
             Patterns = @{}
-            Details = @()
         }
 
         $totalSamples = $sampleLocations.Count
@@ -202,66 +203,166 @@ function Main-Process {
         # Stores up to 500 individual markers with hex previews for the report
         $dataLeftovers = New-DataLeftoverCollection -MaxMarkers 500
 
-        Write-Console "Analyzing $totalSamples sectors..." "Yellow"
+        Write-Console "Analyzing $($totalSamples.ToString('N0')) sectors$(if($sampleLocations.IsFullScan){' (full disk scan)'}else{' (sampled)'})..." "Yellow"
 
-        $progress = 0
-        foreach ($sectorNum in $sampleLocations) {
-            if ($script:cancelRequested) {
-                Write-Console "Scan cancelled by user." "Red"
-                $StatusLabel.Text = "Status: Scan cancelled by user."
-                break
-            }
-
-            $progress++
-            $percent = [math]::Round(($progress / $totalSamples) * 100)
-            #Write-Progress -Activity "Scanning Disk Sectors" -Status "Sector $sectorNum ($percent%)" -PercentComplete $percent
-            $StatusLabel.Text = "Status: Scanning Sector: $sectorNum"
-
-            # Refresh UI Status Every step
-            $ScanProgress.Value = $percent
-            $ProgressLabel.Text = "$percent%"
+        # PERFORMANCE OPTIMIZATION: Open disk stream ONCE for the entire scan
+        # instead of opening/closing per sector (eliminates 100,000+ file operations)
+        $diskStream = $null
+        $buffer = New-Object byte[] $SectorSize
+        try {
+            $diskStream = [System.IO.File]::Open($diskPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        }
+        catch {
+            Write-Console "ERROR: Cannot open disk for reading: $_" "Red"
+            $StatusLabel.Text = "Status: ERROR - Cannot open disk"
             DoEvents
+            return
+        }
 
-            $offset = [long]$sectorNum * $SectorSize
-            $sectorData = Read-DiskSector -DiskPath $diskPath -Offset $offset -Size $SectorSize
+        $progress = [long]0
+        $lastPercent = -1
 
-            ##########################################################
-            # MAYBE NOT NEEDED / ONLY NEEDED IF SCRIPT BREAKS
-            # Log progress every 10%
-            #if ($percent % 10 -eq 0 -and $percent -ne $lastReportedPercent) {
-            #    Write-Console "Progress: $percent% ($progress / $totalSamples sectors)"
-            #    $lastReportedPercent = $percent
-            #}
-            ##########################################################
-
-            $analysis = Test-SectorWiped -SectorData $sectorData
-
-            switch ($analysis.Status) {
-                "Wiped" { $results.Wiped++ }
-                "NOT Wiped" { $results.NotWiped++ }
-                "Suspicious" { $results.Suspicious++ }
-                "Unreadable" { $results.Unreadable++ }
-            }
-
-            if (-not $results.Patterns.ContainsKey($analysis.Pattern)) {
-                $results.Patterns[$analysis.Pattern] = 0
-            }
-            $results.Patterns[$analysis.Pattern]++
-
-            # Collect data leftover markers for NOT Wiped and Suspicious sectors
-            if ($sectorData -and ($analysis.Status -eq "NOT Wiped" -or $analysis.Status -eq "Suspicious")) {
-                $marker = Get-DataLeftoverMarker -SectorNumber $sectorNum -SectorSize $SectorSize `
-                    -AnalysisResult $analysis -SectorData $sectorData
-                Add-DataLeftoverMarker -Collection $dataLeftovers -Marker $marker
-            }
-
-            # MEMORY OPTIMIZATION: Update running histogram instead of storing all bytes
-            if ($sectorData) {
-                foreach ($byte in $sectorData) {
-                    $runningHistogram[$byte]++
+        # Iterate based on scan type - full scan uses counter, sampled uses array
+        if ($sampleLocations.IsFullScan) {
+            # FULL SCAN: sequential iteration with no array allocation
+            $sectorNum = [long]0
+            while ($sectorNum -lt $totalSamples) {
+                if ($script:cancelRequested) {
+                    Write-Console "Scan cancelled by user." "Red"
+                    $StatusLabel.Text = "Status: Scan cancelled by user."
+                    break
                 }
-                $totalBytesRead += $sectorData.Length
+
+                $progress++
+                $percent = [int][math]::Floor(($progress / $totalSamples) * 100)
+
+                # Only update UI every 1% change to avoid GUI overhead on millions of sectors
+                if ($percent -ne $lastPercent) {
+                    $StatusLabel.Text = "Status: Scanning Sector: $($sectorNum.ToString('N0')) ($percent%)"
+                    $ScanProgress.Value = [math]::Min($percent, 100)
+                    $ProgressLabel.Text = "$percent%"
+                    DoEvents
+                    $lastPercent = $percent
+                }
+
+                # Read sector using the shared stream
+                $sectorData = $null
+                try {
+                    $offset = $sectorNum * $SectorSize
+                    [void]$diskStream.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                    $bytesRead = $diskStream.Read($buffer, 0, $SectorSize)
+                    if ($bytesRead -gt 0) {
+                        # Copy buffer so analysis functions get their own copy
+                        $sectorData = New-Object byte[] $bytesRead
+                        [System.Buffer]::BlockCopy($buffer, 0, $sectorData, 0, $bytesRead)
+                    }
+                }
+                catch {
+                    $sectorData = $null
+                }
+
+                $analysis = Test-SectorWiped -SectorData $sectorData
+
+                switch ($analysis.Status) {
+                    "Wiped" { $results.Wiped++ }
+                    "NOT Wiped" { $results.NotWiped++ }
+                    "Suspicious" { $results.Suspicious++ }
+                    "Unreadable" { $results.Unreadable++ }
+                }
+
+                if (-not $results.Patterns.ContainsKey($analysis.Pattern)) {
+                    $results.Patterns[$analysis.Pattern] = 0
+                }
+                $results.Patterns[$analysis.Pattern]++
+
+                if ($sectorData -and ($analysis.Status -eq "NOT Wiped" -or $analysis.Status -eq "Suspicious")) {
+                    $marker = Get-DataLeftoverMarker -SectorNumber $sectorNum -SectorSize $SectorSize `
+                        -AnalysisResult $analysis -SectorData $sectorData
+                    Add-DataLeftoverMarker -Collection $dataLeftovers -Marker $marker
+                }
+
+                if ($sectorData) {
+                    foreach ($byte in $sectorData) {
+                        $runningHistogram[$byte]++
+                    }
+                    $totalBytesRead += $sectorData.Length
+                }
+
+                $sectorNum++
             }
+        }
+        else {
+            # SAMPLED SCAN: iterate over pre-built sorted array
+            foreach ($sectorNum in $sampleLocations._array) {
+                if ($script:cancelRequested) {
+                    Write-Console "Scan cancelled by user." "Red"
+                    $StatusLabel.Text = "Status: Scan cancelled by user."
+                    break
+                }
+
+                $progress++
+                $percent = [int][math]::Floor(($progress / $totalSamples) * 100)
+
+                if ($percent -ne $lastPercent) {
+                    $StatusLabel.Text = "Status: Scanning Sector: $($sectorNum.ToString('N0')) ($percent%)"
+                    $ScanProgress.Value = [math]::Min($percent, 100)
+                    $ProgressLabel.Text = "$percent%"
+                    DoEvents
+                    $lastPercent = $percent
+                }
+
+                # Read sector using the shared stream
+                $sectorData = $null
+                try {
+                    $offset = [long]$sectorNum * $SectorSize
+                    [void]$diskStream.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                    $bytesRead = $diskStream.Read($buffer, 0, $SectorSize)
+                    if ($bytesRead -gt 0) {
+                        $sectorData = New-Object byte[] $bytesRead
+                        [System.Buffer]::BlockCopy($buffer, 0, $sectorData, 0, $bytesRead)
+                    }
+                }
+                catch {
+                    $sectorData = $null
+                }
+
+                $analysis = Test-SectorWiped -SectorData $sectorData
+
+                switch ($analysis.Status) {
+                    "Wiped" { $results.Wiped++ }
+                    "NOT Wiped" { $results.NotWiped++ }
+                    "Suspicious" { $results.Suspicious++ }
+                    "Unreadable" { $results.Unreadable++ }
+                }
+
+                if (-not $results.Patterns.ContainsKey($analysis.Pattern)) {
+                    $results.Patterns[$analysis.Pattern] = 0
+                }
+                $results.Patterns[$analysis.Pattern]++
+
+                if ($sectorData -and ($analysis.Status -eq "NOT Wiped" -or $analysis.Status -eq "Suspicious")) {
+                    $marker = Get-DataLeftoverMarker -SectorNumber $sectorNum -SectorSize $SectorSize `
+                        -AnalysisResult $analysis -SectorData $sectorData
+                    Add-DataLeftoverMarker -Collection $dataLeftovers -Marker $marker
+                }
+
+                if ($sectorData) {
+                    foreach ($byte in $sectorData) {
+                        $runningHistogram[$byte]++
+                    }
+                    $totalBytesRead += $sectorData.Length
+                }
+            }
+
+            # Free the sample array now that we are done iterating
+            $sampleLocations._array = $null
+        }
+
+        # Close the shared disk stream
+        if ($diskStream) {
+            $diskStream.Close()
+            $diskStream.Dispose()
+            $diskStream = $null
         }
 
         #Write-Progress -Activity "Scanning Disk Sectors" -Completed
@@ -438,6 +539,11 @@ function Main-Process {
         [System.Windows.Forms.MessageBox]::Show("An error occurred: $_", "Error", "OK", "Error")
     }
     finally {
+        # Ensure disk stream is always closed, even on error/cancel
+        if ($diskStream) {
+            try { $diskStream.Close(); $diskStream.Dispose() } catch {}
+            $diskStream = $null
+        }
         # Re-enable UI
         $StartScan.Enabled = $true
         $CancelScan.Enabled = $false

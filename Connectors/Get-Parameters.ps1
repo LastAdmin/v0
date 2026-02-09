@@ -3,7 +3,7 @@ function Get-Parameters {
     @{
         technician = $TechnicianName.Text
         diskNumber = $diskNumber
-        sampleSize = [int]$SampleSize.Value
+        sampleSize = [long]$SampleSize.Value
         sectorSize = [int]$SectorSize.SelectedItem
         reportFormat = $ReportFormat.SelectedItem
         reportPath = $ReportPath.Text
