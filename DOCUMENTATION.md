@@ -1174,16 +1174,47 @@ $entropy = Get-ShannonEntropyFromHistogram -Histogram $runningHistogram -TotalBy
 - 100,000 sectors x 512 bytes = ~50MB stored
 - With running histogram: ~2KB fixed regardless of sample size
 
-#### 3. Byte Frequency Counting
+#### 3. Byte Frequency Counting (Get-ByteDistributionScore)
+
+**Before (v3.9.0209 and earlier):**
+```powershell
+$frequency = @{}  # Hashtable with object overhead per key
+for ($i = 0; $i -lt 256; $i++) { $frequency[$i] = 0 }
+foreach ($byte in $Data) { $frequency[$byte]++ }
+```
+
+**After (v3.9.0210+):**
+```powershell
+$frequency = New-Object 'int[]' 256  # Fixed array, no object overhead
+foreach ($byte in $Data) { $frequency[$byte]++ }
+```
+
+This matches the pattern already used in `Get-ShannonEntropy` and eliminates hashtable boxing/unboxing overhead on each byte iteration.
+
+#### 4. Time-Based GUI Refresh (v3.9.0210+)
 
 **Before:**
 ```powershell
-$frequency = @{}  # Hashtable with object overhead
+# DoEvents only called when percentage changes - freezes for large 1% blocks
+if ($percent -ne $lastPercent) {
+    DoEvents
+    $lastPercent = $percent
+}
 ```
 
 **After:**
 ```powershell
-$frequency = New-Object 'int[]' 256  # Fixed array, no object overhead
+$uiTimer = [System.Diagnostics.Stopwatch]::StartNew()
+$uiIntervalMs = 200
+
+if ($percent -ne $lastPercent) {
+    DoEvents
+    $lastPercent = $percent
+    $uiTimer.Restart()
+} elseif ($uiTimer.ElapsedMilliseconds -ge $uiIntervalMs) {
+    DoEvents                      # Keeps GUI responsive between % ticks
+    $uiTimer.Restart()
+}
 ```
 
 ### Memory Usage Summary
@@ -1342,12 +1373,15 @@ Get-Disk -Number 0 | Select-Object OperationalStatus
 2. Or install wkhtmltopdf from https://wkhtmltopdf.org/
 3. HTML report will still be generated as fallback
 
-#### Script Freezes with Large Sample Size
+#### Script Freezes / GUI Unresponsive During Scan
 
-**Cause:** Memory exhaustion (should be fixed in optimized version).
+**Cause:** In versions prior to 3.9.0210, the GUI only called `DoEvents` when the percentage changed (every 1%). For large scans, each 1% could represent thousands of sectors, leaving the GUI blocked for seconds or minutes.
 
-**Solution:**
-1. Ensure you're using the latest optimized version
+**Solution (v3.9.0210+):**
+The scan loop now uses a `System.Diagnostics.Stopwatch`-based timer that calls `DoEvents` every 200ms regardless of whether the percentage has changed. This keeps the GUI responsive at all times (cancel button, window dragging, etc.).
+
+If you are on an older version:
+1. Update to the latest version
 2. Close other applications to free memory
 3. Reduce sample size if still occurring
 
@@ -1405,6 +1439,7 @@ Write-Console "Elapsed: $($stopwatch.Elapsed.TotalSeconds) seconds" "Cyan"
 | 3.8.0116.03 | 2026-01-12 | Modular architecture |
 | 3.8.0203.01 | 2026-02-03 | Memory optimization for large samples |
 | 3.9.0209.01 | 2026-02-09 | Data leftover markers module with report integration |
+| 3.9.0210.01 | 2026-02-10 | Time-based UI refresh (200ms Stopwatch), ByteDistributionScore array optimization, Start-Scan bug fix |
 
 ---
 

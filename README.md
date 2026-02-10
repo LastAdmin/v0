@@ -119,6 +119,8 @@ The tool uses several techniques to minimize memory usage:
 
 3. **Pre-allocated Collections** - Uses `List<T>` and typed arrays instead of ArrayList and hashtables.
 
+4. **Time-Based GUI Refresh** - A `Stopwatch` timer calls `DoEvents` every 200ms during the scan loop, preventing the GUI from freezing regardless of sample size or disk speed. Previously, UI updates only occurred on percentage changes, causing the window to become unresponsive for large scans.
+
 **Memory Usage Comparison:**
 | Sample Size | Old Algorithm | New Algorithm |
 |-------------|---------------|---------------|
@@ -200,7 +202,8 @@ The collection is capped at **500 markers** by default. If more than 500 sectors
 - Ensure PowerShell is running as Administrator
 - Check if the disk is in use by another application
 
-### Script Freezes
+### Script Freezes / GUI Unresponsive During Scan
+- **v3.9.0210+:** The scan loop now uses a time-based UI refresh (every 200ms) in addition to the percentage-based refresh. If you are on an older version, update to the latest.
 - Reduce sample size for low-memory systems
 - Avoid "Full Disk Scan" on large drives
 - Close other applications to free RAM
@@ -224,6 +227,7 @@ The collection is capped at **500 markers** by default. If more than 500 sectors
 | 3.8.0116.03 | 2026-01-12 | Modular architecture |
 | 3.9.0203.01 | 2026-02-03 | Memory optimization for large sample sizes |
 | 3.9.0209.01 | 2026-02-09 | Data leftover markers module, report section for manual review |
+| 3.9.0210.01 | 2026-02-10 | Time-based UI refresh to prevent GUI freezing, optimized byte distribution scoring, bug fixes |
 
 ## Author
 
