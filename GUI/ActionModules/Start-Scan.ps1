@@ -41,7 +41,8 @@ function Start-Scan {
     $ProgressLabel.Text = "0%"
     $VerificationPanel.Visible = $false
     $VerificationPanel.BackColor = Color 100 100 100
-    $ResultLabel.Text = Color 255 255 255
+    $ResultLabel.ForeColor = Color 255 255 255
+    $ResultLabel.Text = ""
     $Console.Clear()
 
     # Get Parameters

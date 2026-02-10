@@ -222,6 +222,12 @@ function Main-Process {
         $progress = [long]0
         $lastPercent = -1
 
+        # TIME-BASED UI REFRESH: call DoEvents at least every 200ms so the GUI
+        # stays responsive (cancel button, window drag, etc.) even when each 1%
+        # represents thousands of sectors.
+        $uiTimer = [System.Diagnostics.Stopwatch]::StartNew()
+        $uiIntervalMs = 200
+
         # Iterate based on scan type - full scan uses counter, sampled uses array
         if ($sampleLocations.IsFullScan) {
             # FULL SCAN: sequential iteration with no array allocation
@@ -236,13 +242,18 @@ function Main-Process {
                 $progress++
                 $percent = [int][math]::Floor(($progress / $totalSamples) * 100)
 
-                # Only update UI every 1% change to avoid GUI overhead on millions of sectors
+                # Update UI on percent change OR on a 200ms timer - whichever comes first
                 if ($percent -ne $lastPercent) {
                     $StatusLabel.Text = "Status: Scanning Sector: $($sectorNum.ToString('N0')) ($percent%)"
                     $ScanProgress.Value = [math]::Min($percent, 100)
                     $ProgressLabel.Text = "$percent%"
                     DoEvents
                     $lastPercent = $percent
+                    $uiTimer.Restart()
+                } elseif ($uiTimer.ElapsedMilliseconds -ge $uiIntervalMs) {
+                    $StatusLabel.Text = "Status: Scanning Sector: $($sectorNum.ToString('N0')) ($percent%)"
+                    DoEvents
+                    $uiTimer.Restart()
                 }
 
                 # Read sector using the shared stream
@@ -293,6 +304,7 @@ function Main-Process {
         }
         else {
             # SAMPLED SCAN: iterate over pre-built sorted array
+            $uiTimer.Restart()
             foreach ($sectorNum in $sampleLocations._array) {
                 if ($script:cancelRequested) {
                     Write-Console "Scan cancelled by user." "Red"
@@ -309,6 +321,11 @@ function Main-Process {
                     $ProgressLabel.Text = "$percent%"
                     DoEvents
                     $lastPercent = $percent
+                    $uiTimer.Restart()
+                } elseif ($uiTimer.ElapsedMilliseconds -ge $uiIntervalMs) {
+                    $StatusLabel.Text = "Status: Scanning Sector: $($sectorNum.ToString('N0')) ($percent%)"
+                    DoEvents
+                    $uiTimer.Restart()
                 }
 
                 # Read sector using the shared stream

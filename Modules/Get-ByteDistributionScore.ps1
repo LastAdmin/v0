@@ -3,14 +3,14 @@ function Get-ByteDistributionScore {
 
     if ($null -eq $Data -or $Data.Length -eq 0) { return 0 }
 
-    $frequency = @{}
-    for ($i = 0; $i -lt 256; $i++) { $frequency[$i] = 0 }
+    # Use fixed-size array instead of hashtable - faster and more memory efficient
+    $frequency = New-Object 'int[]' 256
     foreach ($byte in $Data) { $frequency[$byte]++ }
 
     $expected = $Data.Length / 256.0
     $chiSquare = 0.0
-    foreach ($count in $frequency.Values) {
-        $diff = $count - $expected
+    for ($i = 0; $i -lt 256; $i++) {
+        $diff = $frequency[$i] - $expected
         $chiSquare += ($diff * $diff) / $expected
     }
 
