@@ -32,9 +32,12 @@
                                             data remnants, stores hex/ASCII previews, adds report section
     09.02.2026      v0 / YM                 Fixed critical memory crash: streaming iterator for full-disk scans,
                                             shared FileStream, eliminated array-limit errors on large sample sizes
-    11.02.2026      v0 / YM                 PERFORMANCE: Compiled C# SectorAnalyzer replaces all interpreted
-                                            PowerShell byte loops. Batch I/O reads 2048 sectors per call.
-                                            Full 64GB disk scan reduced from ~24h+ to minutes.
+    11.02.2026      v0 / YM                 PERFORMANCE v1: Compiled C# SectorAnalyzer replaces interpreted
+                                            PowerShell byte loops. Batch I/O reads sectors per call.
+    11.02.2026      v0 / YM                 PERFORMANCE v2: RunFullScan() moves the ENTIRE full-disk scan
+                                            loop into C#. PowerShell no longer iterates sectors at all.
+                                            4 MB batch I/O, in-place analysis (no per-sector array alloc),
+                                            result accumulation in C#. 64 GB disk: ~24h+ -> minutes.
 #>
 
 function Main-Process {
@@ -230,16 +233,20 @@ function Main-Process {
         Write-Console "Analyzing $($totalSamples.ToString('N0')) sectors$(if($sampleLocations.IsFullScan){' (full disk scan)'}else{' (sampled)'})..." "Yellow"
 
         # ====================================================================
-        # COMPILED C# BATCH SCAN ENGINE
+        # COMPILED C# SCAN ENGINE
         # ====================================================================
-        # Instead of processing 1 sector at a time with 6+ PowerShell
-        # foreach loops each, we process batches of 2048 sectors (1 MB at
-        # 512 bytes/sector) in a single compiled C# call. The C# code does:
-        #   - One I/O read for the entire batch
-        #   - Single-pass analysis per sector (zero/FF check, frequency
-        #     counting, entropy, distribution, ASCII ratio, classification)
-        #   - Running histogram accumulation
-        # This reduces full-disk scan time from ~24h+ to minutes.
+        # Full-disk scans run ENTIRELY in compiled C# via RunFullScan().
+        # PowerShell never iterates individual sectors -- the C# code does:
+        #   - Sequential 4 MB batch I/O reads (8192 sectors @ 512B)
+        #   - Single-pass per-sector analysis (zero/FF, entropy, distribution,
+        #     ASCII ratio, file signatures, classification)
+        #   - Result accumulation (wiped/not wiped/suspicious/unreadable counts)
+        #   - Running histogram for overall entropy
+        #   - Data leftover marker collection (capped at 500)
+        # A ProgressCallback delegate is invoked every ~200ms so PowerShell
+        # can update the GUI (status label, progress bar, DoEvents).
+        #
+        # Sampled scans still use per-sector C# analysis with PS I/O seeking.
         # ====================================================================
 
         $diskStream = $null
@@ -253,127 +260,98 @@ function Main-Process {
             return
         }
 
-        # Batch size: 2048 sectors per I/O call = 1 MB at 512 bytes/sector
-        # Larger batches = fewer I/O calls + fewer PowerShell loop iterations
-        $batchSize = 2048
-
-        $progress = [long]0
-        $lastPercent = -1
-        $uiTimer = [System.Diagnostics.Stopwatch]::StartNew()
-        $uiIntervalMs = 200
-
-        # Helper: process results from a batch of SectorResult structs
-        # This is the ONLY PowerShell loop left, and it iterates SectorResult
-        # structs (not bytes), so the overhead is negligible.
-        function Process-BatchResults {
-            param(
-                [System.Collections.Generic.List[SectorResult]]$batchResults,
-                [long]$baseSector,
-                [bool]$isSequential
-            )
-
-            for ($i = 0; $i -lt $batchResults.Count; $i++) {
-                $r = $batchResults[$i]
-                $sectorNum = if ($isSequential) { $baseSector + $i } else { $baseSector }
-
-                switch ($r.Status) {
-                    "Wiped"      { $results.Wiped++ }
-                    "NOT Wiped"  { $results.NotWiped++ }
-                    "Suspicious" { $results.Suspicious++ }
-                    "Unreadable" { $results.Unreadable++ }
-                }
-
-                if (-not $results.Patterns.ContainsKey($r.Pattern)) {
-                    $results.Patterns[$r.Pattern] = 0
-                }
-                $results.Patterns[$r.Pattern]++
-
-                # Data leftover markers for flagged sectors (lightweight - no byte loops)
-                if ($r.Status -eq "NOT Wiped" -or $r.Status -eq "Suspicious") {
-                    $actualSector = if ($isSequential) { $baseSector + $i } else { $baseSector }
-                    $byteOff = [long]$actualSector * $SectorSize
-                    $marker = @{
-                        SectorNumber  = $actualSector
-                        ByteOffset    = "0x{0:X}" -f $byteOff
-                        ByteOffsetDec = $byteOff
-                        Status        = $r.Status
-                        Pattern       = $r.Pattern
-                        Confidence    = $r.Confidence
-                        Details       = $r.Details
-                        HexPreview    = ""
-                        AsciiPreview  = ""
-                    }
-                    Add-DataLeftoverMarker -Collection $dataLeftovers -Marker $marker
-                }
-            }
-        }
-
         if ($sampleLocations.IsFullScan) {
             # ==============================================================
-            # FULL SCAN: Sequential batch I/O - read 2048 sectors per call
+            # FULL SCAN: Entire scan runs in compiled C#
             # ==============================================================
-            $sectorNum = [long]0
-            $cancelled = $false
-            while ($sectorNum -lt $totalSamples -and -not $cancelled) {
+            # The only PowerShell code that executes during the scan is the
+            # progress callback (~5 calls/sec), which updates the GUI.
+            # Everything else -- I/O, analysis, result accumulation -- is C#.
+            # ==============================================================
+
+            # Cancel flag: C# checks cancelFlag[0] each batch iteration
+            $cancelFlag = [int[]]@(0)
+
+            # Progress callback: invoked from C# every ~200ms or on % change
+            $progressCallback = [ProgressCallback]{
+                param([long]$currentSector, [int]$percent, [long]$scannedSoFar)
+
+                # Check if PowerShell-side cancel was requested
                 if ($script:cancelRequested) {
-                    Write-Console "Scan cancelled by user." "Red"
-                    $StatusLabel.Text = "Status: Scan cancelled by user."
-                    $cancelled = $true
-                    break
+                    $cancelFlag[0] = 1
                 }
 
-                # Determine batch size (last batch may be smaller)
-                $remaining = $totalSamples - $sectorNum
-                $currentBatch = [int][math]::Min($batchSize, $remaining)
+                $StatusLabel.Text = "Status: Scanning Sector: $($currentSector.ToString('N0')) ($percent%)"
+                $ScanProgress.Value = [math]::Min($percent, 100)
+                $ProgressLabel.Text = "$percent%"
+                DoEvents
+            }
 
-                # C# batch read + analyze: one I/O call, compiled analysis
-                $batchResults = $null
-                try {
-                    $batchResults = [SectorAnalyzer]::ScanDiskBatch(
-                        $diskStream, $sectorNum, $currentBatch, $SectorSize,
-                        $runningHistogram, $sigValues, $sigNames)
+            Write-Console "Starting compiled full-disk scan engine..." "Yellow"
+            $StatusLabel.Text = "Status: Starting full-disk scan..."
+            DoEvents
+
+            # ONE call processes the entire disk
+            $scanSummary = [SectorAnalyzer]::RunFullScan(
+                $diskStream,
+                $totalSamples,
+                $SectorSize,
+                $sigValues,
+                $sigNames,
+                $progressCallback,
+                $cancelFlag
+            )
+
+            # Transfer C# summary into the PowerShell results structure
+            $results.Wiped      = [long]$scanSummary.Wiped
+            $results.NotWiped   = [long]$scanSummary.NotWiped
+            $results.Suspicious = [long]$scanSummary.Suspicious
+            $results.Unreadable = [long]$scanSummary.Unreadable
+            foreach ($kvp in $scanSummary.Patterns.GetEnumerator()) {
+                $results.Patterns[$kvp.Key] = $kvp.Value
+            }
+            $runningHistogram = $scanSummary.RunningHistogram
+            $totalBytesRead   = $scanSummary.TotalBytesRead
+
+            # Transfer data leftover markers from C# structs to PS hashtables
+            $dataLeftovers.Summary.TotalNotWiped   = [long]$scanSummary.SummaryNotWiped
+            $dataLeftovers.Summary.TotalSuspicious = [long]$scanSummary.SummarySuspicious
+            foreach ($kvp in $scanSummary.MarkerPatternCounts.GetEnumerator()) {
+                $dataLeftovers.Summary.PatternCounts[$kvp.Key] = $kvp.Value
+            }
+            $dataLeftovers.OverflowCount = $scanSummary.MarkerOverflowCount
+            foreach ($m in $scanSummary.Markers) {
+                $marker = @{
+                    SectorNumber  = $m.SectorNumber
+                    ByteOffset    = $m.ByteOffset
+                    ByteOffsetDec = $m.ByteOffsetDec
+                    Status        = $m.Status
+                    Pattern       = $m.Pattern
+                    Confidence    = $m.Confidence
+                    Details       = $m.Details
+                    HexPreview    = $m.HexPreview
+                    AsciiPreview  = $m.AsciiPreview
                 }
-                catch {
-                    # On I/O error, mark entire batch as unreadable
-                    $batchResults = New-Object 'System.Collections.Generic.List[SectorResult]'
-                    for ($e = 0; $e -lt $currentBatch; $e++) {
-                        $ur = New-Object SectorResult
-                        $ur.Status = "Unreadable"; $ur.Pattern = "N/A"
-                        $ur.Confidence = 0; $ur.Details = "I/O error: $_"
-                        $batchResults.Add($ur)
-                    }
-                }
+                $dataLeftovers.Markers.Add($marker)
+            }
 
-                # Process results (lightweight - no byte-level work)
-                Process-BatchResults -batchResults $batchResults -baseSector $sectorNum -isSequential $true
-
-                $progress += $currentBatch
-                $totalBytesRead += ([long]$currentBatch * $SectorSize)
-                $percent = [int][math]::Floor(($progress / $totalSamples) * 100)
-
-                if ($percent -ne $lastPercent) {
-                    $StatusLabel.Text = "Status: Scanning Sector: $($sectorNum.ToString('N0')) ($percent%)"
-                    $ScanProgress.Value = [math]::Min($percent, 100)
-                    $ProgressLabel.Text = "$percent%"
-                    DoEvents
-                    $lastPercent = $percent
-                    $uiTimer.Restart()
-                } elseif ($uiTimer.ElapsedMilliseconds -ge $uiIntervalMs) {
-                    $StatusLabel.Text = "Status: Scanning Sector: $($sectorNum.ToString('N0')) ($percent%)"
-                    DoEvents
-                    $uiTimer.Restart()
-                }
-
-                $sectorNum += $currentBatch
+            if ($scanSummary.Cancelled) {
+                Write-Console "Scan cancelled by user." "Red"
+                $StatusLabel.Text = "Status: Scan cancelled by user."
             }
         }
         else {
             # ==============================================================
             # SAMPLED SCAN: Per-sector seeking (sectors are non-contiguous)
-            # Still uses compiled C# for analysis - just can't batch I/O
+            # Still uses compiled C# for analysis -- just can't batch I/O
+            # because the sectors are scattered across the disk.
             # ==============================================================
+            $progress = [long]0
+            $lastPercent = -1
+            $uiTimer = [System.Diagnostics.Stopwatch]::StartNew()
+            $uiIntervalMs = 200
             $buffer = New-Object byte[] $SectorSize
-            $uiTimer.Restart()
+
             foreach ($sectorNum in $sampleLocations._array) {
                 if ($script:cancelRequested) {
                     Write-Console "Scan cancelled by user." "Red"
@@ -396,7 +374,7 @@ function Main-Process {
                     $sectorData = $null
                 }
 
-                # Compiled C# single-sector analysis (still ~100x faster than PS)
+                # Compiled C# single-sector analysis (~100x faster than PS)
                 $analysis = [SectorAnalyzer]::AnalyzeSector(
                     $sectorData, $runningHistogram, $sigValues, $sigNames)
 
