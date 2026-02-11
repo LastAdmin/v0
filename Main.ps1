@@ -238,7 +238,7 @@ function Main-Process {
                 }
 
                 # Process the entire chunk in compiled C# (one call for all sectors)
-                $chunkStats = [DiskAnalysisEngine]::AnalyzeChunk($chunkBuffer, $bytesRead, $SectorSize, $patternCounts)
+                $chunkStats = [DiskAnalysisEngine]::AnalyzeChunk($chunkBuffer, $bytesRead, $SectorSize, $patternCounts, [long]$sectorIndex)
 
                 $results.Wiped      += $chunkStats.Wiped
                 $results.NotWiped   += $chunkStats.NotWiped
@@ -296,8 +296,14 @@ function Main-Process {
 
                 switch ($sectorResult.Status) {
                     0 { $results.Wiped++ }
-                    1 { $results.NotWiped++ }
-                    2 { $results.Suspicious++ }
+                    1 {
+                        $results.NotWiped++
+                        [DiskAnalysisEngine]::RecordLeftover([long]$sectorNum, $SectorSize, $sectorResult)
+                    }
+                    2 {
+                        $results.Suspicious++
+                        [DiskAnalysisEngine]::RecordLeftover([long]$sectorNum, $SectorSize, $sectorResult)
+                    }
                     3 { $results.Unreadable++ }
                 }
 
@@ -403,6 +409,12 @@ function Main-Process {
             Write-Console "  $($pattern.Key): $($pattern.Value) sectors" "Info"
         }
 
+        # Retrieve leftover data from the compiled engine
+        $leftovers = [DiskAnalysisEngine]::GetLeftovers()
+        $totalLeftoverCount = [DiskAnalysisEngine]::GetTotalLeftoverCount()
+
+        Write-Console "Leftover sectors with potential data: $($totalLeftoverCount.ToString('N0'))" $(if($totalLeftoverCount -gt 0){"Yellow"}else{"SpringGreen"})
+
         # Generate Reports
         Write-Console "_____________________________________________________" "Gray"
         Write-Console "Generating Report(s)..." "Yellow"
@@ -411,7 +423,8 @@ function Main-Process {
 
         $htmlContent = New-HtmlReport -Technician $Technician -Results $results -Disk $disk -DiskNumber $DiskNumber `
     -DiskSize $diskSize -TotalSamples $totalSamples -WipedPercent $wipedPercent `
-    -EntropyPercent $entropyPercent -OverallStatus $overallStatus -SectorSize $SectorSize
+    -EntropyPercent $entropyPercent -OverallStatus $overallStatus -SectorSize $SectorSize `
+    -Leftovers $leftovers -TotalLeftoverCount $totalLeftoverCount
 
         $htmlPath = "$ReportFile.html"
         $pdfPath = "$ReportFile.pdf"

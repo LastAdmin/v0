@@ -4,6 +4,7 @@
 Add-Type -TypeDefinition @"
 using System;
 using System.IO;
+using System.Collections.Generic;
 
 public struct SectorResult
 {
@@ -20,21 +21,57 @@ public struct ChunkStats
     public int Unreadable;
 }
 
+// Represents a single leftover finding for the report
+public struct LeftoverEntry
+{
+    public long SectorNumber;
+    public long DiskOffset;      // Byte offset on disk
+    public string Status;        // "NOT Wiped" or "Suspicious"
+    public string Pattern;
+    public int Confidence;
+}
+
 public static class DiskAnalysisEngine
 {
-    // Shared accumulator: 256 byte frequencies + printable ASCII count + total byte count
-    // Index 0-255 = byte frequencies, 256 = printableAsciiCount, 257 = totalByteCount (high), 258 = totalByteCount (low)
-    // We use long[] for the global accumulator
+    // Shared accumulator for byte frequency, entropy, and distribution
     public static long[] GlobalFrequency = new long[256];
     public static long GlobalTotalBytes = 0;
     public static long GlobalPrintableAscii = 0;
+
+    // Leftover tracking: sectors with potential residual data
+    // Capped to prevent unbounded memory growth on unwiped disks
+    public static List<LeftoverEntry> Leftovers = new List<LeftoverEntry>();
+    public static int MaxLeftovers = 500;       // Store up to 500 detailed entries
+    public static long TotalLeftoverCount = 0;  // Track the real total even beyond cap
 
     public static void ResetGlobalCounters()
     {
         Array.Clear(GlobalFrequency, 0, 256);
         GlobalTotalBytes = 0;
         GlobalPrintableAscii = 0;
+        Leftovers.Clear();
+        TotalLeftoverCount = 0;
     }
+
+    // Record a leftover finding (thread-safe not needed in single-threaded PS)
+    public static void RecordLeftover(long sectorNum, int sectorSize, SectorResult result)
+    {
+        TotalLeftoverCount++;
+        if (Leftovers.Count < MaxLeftovers)
+        {
+            LeftoverEntry entry = new LeftoverEntry();
+            entry.SectorNumber = sectorNum;
+            entry.DiskOffset = sectorNum * sectorSize;
+            entry.Status = result.Status == 1 ? "NOT Wiped" : "Suspicious";
+            entry.Pattern = result.Pattern;
+            entry.Confidence = result.Confidence;
+            Leftovers.Add(entry);
+        }
+    }
+
+    // Public accessors for PowerShell
+    public static LeftoverEntry[] GetLeftovers() { return Leftovers.ToArray(); }
+    public static long GetTotalLeftoverCount() { return TotalLeftoverCount; }
 
     // File signature definitions (populated once from PowerShell)
     private static byte[][] sigBytes;
@@ -189,10 +226,10 @@ public static class DiskAnalysisEngine
     }
 
     // Process an entire buffer of multiple sectors at once (the hot path)
-    // Returns aggregated counts: [wiped, notWiped, suspicious, unreadable]
-    // Also returns pattern counts via the patternCounts dictionary
+    // baseSectorIndex: the disk sector number of the first sector in the buffer
+    // This allows leftover tracking to record the correct absolute sector address
     public static ChunkStats AnalyzeChunk(byte[] buffer, int bytesRead, int sectorSize,
-        System.Collections.Generic.Dictionary<string, int> patternCounts)
+        Dictionary<string, int> patternCounts, long baseSectorIndex)
     {
         ChunkStats stats = new ChunkStats();
         int sectorsInChunk = bytesRead / sectorSize;
@@ -208,6 +245,12 @@ public static class DiskAnalysisEngine
                 case 1: stats.NotWiped++; break;
                 case 2: stats.Suspicious++; break;
                 case 3: stats.Unreadable++; break;
+            }
+
+            // Record leftovers for NOT Wiped (1) and Suspicious (2)
+            if (result.Status == 1 || result.Status == 2)
+            {
+                RecordLeftover(baseSectorIndex + s, sectorSize, result);
             }
 
             if (patternCounts.ContainsKey(result.Pattern))
