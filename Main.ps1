@@ -197,7 +197,11 @@ function Main-Process {
             Details = @()
         }
 
-        $allBytes = New-Object System.Collections.ArrayList
+        # Streaming counters instead of storing all bytes in memory
+        # A 256-element frequency table is all we need for entropy, distribution, and histogram
+        [long[]]$byteFrequency = New-Object long[] 256
+        [long]$totalByteCount = 0
+        [long]$printableAsciiCount = 0
 
         Write-Console "Analyzing $($totalSamples.ToString('N0')) sectors..." "Yellow"
 
@@ -262,8 +266,15 @@ function Main-Process {
                     }
                     $results.Patterns[$analysis.Pattern]++
 
+                    # Update streaming counters (no array storage)
                     if ($sectorData) {
-                        $allBytes.AddRange($sectorData) | Out-Null
+                        $totalByteCount += $sectorData.Length
+                        foreach ($b2 in $sectorData) {
+                            $byteFrequency[$b2]++
+                            if (($b2 -ge 32 -and $b2 -le 126) -or $b2 -eq 9 -or $b2 -eq 10 -or $b2 -eq 13) {
+                                $printableAsciiCount++
+                            }
+                        }
                     }
                 }
 
@@ -313,8 +324,15 @@ function Main-Process {
                 }
                 $results.Patterns[$analysis.Pattern]++
 
+                # Update streaming counters (no array storage)
                 if ($sectorData) {
-                    $allBytes.AddRange($sectorData) | Out-Null
+                    $totalByteCount += $sectorData.Length
+                    foreach ($b2 in $sectorData) {
+                        $byteFrequency[$b2]++
+                        if (($b2 -ge 32 -and $b2 -le 126) -or $b2 -eq 9 -or $b2 -eq 10 -or $b2 -eq 13) {
+                            $printableAsciiCount++
+                        }
+                    }
                 }
 
                 # Throttled UI update
@@ -343,11 +361,19 @@ function Main-Process {
         $StatusLabel.Text = "Status: Sector Scan Completed"
         DoEvents
 
-        # Calculate overall entropy
-        Write-Console "Calculate ovarall entropy..." "Yellow"
+        # Calculate overall entropy from streaming frequency counters
+        Write-Console "Calculate overall entropy..." "Yellow"
         $StatusLabel.Text = "Status: Calculate overall entropy..."
         DoEvents
-        $overallEntropy = Get-ShannonEntropy -Data $allBytes.ToArray()
+        $overallEntropy = 0.0
+        if ($totalByteCount -gt 0) {
+            for ($i = 0; $i -lt 256; $i++) {
+                if ($byteFrequency[$i] -gt 0) {
+                    $p = $byteFrequency[$i] / $totalByteCount
+                    $overallEntropy -= $p * [math]::Log($p, 2)
+                }
+            }
+        }
         $entropyPercent = [math]::Round(($overallEntropy / 8) * 100, 2)
 
         # Calculate wiped percentage
