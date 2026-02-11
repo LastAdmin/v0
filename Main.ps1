@@ -167,11 +167,22 @@ function Main-Process {
         #}
         ##########################################################
 
-        # Build sample locations
-        Write-Console "Build Sample Locations..." "Yellow"
-        $StatusLabel.Text = "Status: Build Sample Locations..."
-        DoEvents
-        $sampleLocations = Get-SampleLocations -TotalSectors $totalSectors -SampleSize $sampleSize
+        # Determine if this is a full disk scan (sequential) or sample scan (random)
+        $isFullDiskScan = $FullDiskCheckBox.Checked
+
+        if ($isFullDiskScan) {
+            Write-Console "Full Disk Scan: scanning all $($totalSectors.ToString('N0')) sectors sequentially..." "Yellow"
+            $StatusLabel.Text = "Status: Full Disk Scan - sequential read..."
+            DoEvents
+            $totalSamples = $totalSectors
+        } else {
+            Write-Console "Build Sample Locations..." "Yellow"
+            $StatusLabel.Text = "Status: Build Sample Locations..."
+            DoEvents
+            $sampleLocations = Get-SampleLocations -TotalSectors $totalSectors -SampleSize $sampleSize
+            $totalSamples = $sampleLocations.Count
+            Write-Console "Sampling $totalSamples sectors..." "Yellow"
+        }
 
         # Initialize results
         Write-Console "Initialize Results..." "Yellow"
@@ -186,61 +197,148 @@ function Main-Process {
             Details = @()
         }
 
-        $totalSamples = $sampleLocations.Count
         $allBytes = New-Object System.Collections.ArrayList
 
-        Write-Console "Analyzing $totalSamples sectors..." "Yellow"
+        Write-Console "Analyzing $($totalSamples.ToString('N0')) sectors..." "Yellow"
+
+        # Open the disk stream once and keep it open for the entire scan
+        $diskStream = $null
+        try {
+            $diskStream = [System.IO.File]::Open($diskPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        }
+        catch {
+            Write-Console "ERROR: Could not open disk stream: $_" "Red"
+            throw
+        }
+
+        # Pre-allocate a reusable read buffer
+        $readBuffer = New-Object byte[] $SectorSize
+
+        # For buffered reading: read multiple sectors at once
+        $batchSize = 256
+        $batchBuffer = New-Object byte[] ($SectorSize * $batchSize)
 
         $progress = 0
-        foreach ($sectorNum in $sampleLocations) {
-            if ($script:cancelRequested) {
-                Write-Console "Scan cancelled by user." "Red"
-                $StatusLabel.Text = "Status: Scan cancelled by user."
-                break
+        $lastUiUpdate = [System.Diagnostics.Stopwatch]::StartNew()
+        $uiUpdateIntervalMs = 100  # Only refresh UI every 100ms
+
+        if ($isFullDiskScan) {
+            # FULL DISK: read sequentially in large batches for maximum throughput
+            $sectorIndex = 0
+            while ($sectorIndex -lt $totalSectors) {
+                if ($script:cancelRequested) {
+                    Write-Console "Scan cancelled by user." "Red"
+                    $StatusLabel.Text = "Status: Scan cancelled by user."
+                    break
+                }
+
+                # Calculate how many sectors to read in this batch
+                $remainingSectors = $totalSectors - $sectorIndex
+                $currentBatchSize = [math]::Min($batchSize, $remainingSectors)
+                $bytesToRead = $currentBatchSize * $SectorSize
+
+                # Read the entire batch in one I/O operation
+                $offset = [long]$sectorIndex * $SectorSize
+                $diskStream.Seek($offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                $bytesRead = $diskStream.Read($batchBuffer, 0, $bytesToRead)
+
+                # Process each sector from the batch buffer
+                for ($b = 0; $b -lt $currentBatchSize; $b++) {
+                    $bufferOffset = $b * $SectorSize
+                    $sectorData = New-Object byte[] $SectorSize
+                    [Array]::Copy($batchBuffer, $bufferOffset, $sectorData, 0, $SectorSize)
+
+                    $analysis = Test-SectorWiped -SectorData $sectorData
+
+                    switch ($analysis.Status) {
+                        "Wiped"      { $results.Wiped++ }
+                        "NOT Wiped"  { $results.NotWiped++ }
+                        "Suspicious" { $results.Suspicious++ }
+                        "Unreadable" { $results.Unreadable++ }
+                    }
+
+                    if (-not $results.Patterns.ContainsKey($analysis.Pattern)) {
+                        $results.Patterns[$analysis.Pattern] = 0
+                    }
+                    $results.Patterns[$analysis.Pattern]++
+
+                    if ($sectorData) {
+                        $allBytes.AddRange($sectorData) | Out-Null
+                    }
+                }
+
+                $progress += $currentBatchSize
+                $sectorIndex += $currentBatchSize
+
+                # Throttled UI update - only refresh every 100ms to avoid GUI freeze
+                if ($lastUiUpdate.ElapsedMilliseconds -ge $uiUpdateIntervalMs) {
+                    $percent = [math]::Round(($progress / $totalSamples) * 100)
+                    $ScanProgress.Value = [math]::Min($percent, 100)
+                    $ProgressLabel.Text = "$percent%"
+                    $StatusLabel.Text = "Status: Scanning Sector: $($sectorIndex.ToString('N0')) / $($totalSectors.ToString('N0'))"
+                    DoEvents
+                    $lastUiUpdate.Restart()
+                }
             }
+        } else {
+            # SAMPLE SCAN: read individual sectors at their random offsets using the persistent stream
+            foreach ($sectorNum in $sampleLocations) {
+                if ($script:cancelRequested) {
+                    Write-Console "Scan cancelled by user." "Red"
+                    $StatusLabel.Text = "Status: Scan cancelled by user."
+                    break
+                }
 
-            $progress++
-            $percent = [math]::Round(($progress / $totalSamples) * 100)
-            #Write-Progress -Activity "Scanning Disk Sectors" -Status "Sector $sectorNum ($percent%)" -PercentComplete $percent
-            $StatusLabel.Text = "Status: Scanning Sector: $sectorNum"
+                $progress++
 
-            # Refresh UI Status Every step
-            $ScanProgress.Value = $percent
-            $ProgressLabel.Text = "$percent%"
-            DoEvents
+                $offset = [long]$sectorNum * $SectorSize
+                $diskStream.Seek($offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                $bytesRead = $diskStream.Read($readBuffer, 0, $SectorSize)
 
-            $offset = [long]$sectorNum * $SectorSize
-            $sectorData = Read-DiskSector -DiskPath $diskPath -Offset $offset -Size $SectorSize
+                # Copy to a fresh array for analysis (buffer is reused)
+                $sectorData = New-Object byte[] $SectorSize
+                [Array]::Copy($readBuffer, $sectorData, $SectorSize)
 
-            ##########################################################
-            # MAYBE NOT NEEDED / ONLY NEEDED IF SCRIPT BREAKS
-            # Log progress every 10%
-            #if ($percent % 10 -eq 0 -and $percent -ne $lastReportedPercent) {
-            #    Write-Console "Progress: $percent% ($progress / $totalSamples sectors)"
-            #    $lastReportedPercent = $percent
-            #}
-            ##########################################################
+                $analysis = Test-SectorWiped -SectorData $sectorData
 
-            $analysis = Test-SectorWiped -SectorData $sectorData
+                switch ($analysis.Status) {
+                    "Wiped"      { $results.Wiped++ }
+                    "NOT Wiped"  { $results.NotWiped++ }
+                    "Suspicious" { $results.Suspicious++ }
+                    "Unreadable" { $results.Unreadable++ }
+                }
 
-            switch ($analysis.Status) {
-                "Wiped" { $results.Wiped++ }
-                "NOT Wiped" { $results.NotWiped++ }
-                "Suspicious" { $results.Suspicious++ }
-                "Unreadable" { $results.Unreadable++ }
-            }
+                if (-not $results.Patterns.ContainsKey($analysis.Pattern)) {
+                    $results.Patterns[$analysis.Pattern] = 0
+                }
+                $results.Patterns[$analysis.Pattern]++
 
-            if (-not $results.Patterns.ContainsKey($analysis.Pattern)) {
-                $results.Patterns[$analysis.Pattern] = 0
-            }
-            $results.Patterns[$analysis.Pattern]++
+                if ($sectorData) {
+                    $allBytes.AddRange($sectorData) | Out-Null
+                }
 
-            if ($sectorData) {
-                $allBytes.AddRange($sectorData) | Out-Null
+                # Throttled UI update
+                if ($lastUiUpdate.ElapsedMilliseconds -ge $uiUpdateIntervalMs) {
+                    $percent = [math]::Round(($progress / $totalSamples) * 100)
+                    $ScanProgress.Value = [math]::Min($percent, 100)
+                    $ProgressLabel.Text = "$percent%"
+                    $StatusLabel.Text = "Status: Scanning Sector: $sectorNum"
+                    DoEvents
+                    $lastUiUpdate.Restart()
+                }
             }
         }
 
-        #Write-Progress -Activity "Scanning Disk Sectors" -Completed
+        # Close the disk stream
+        if ($diskStream) {
+            $diskStream.Close()
+            $diskStream.Dispose()
+            $diskStream = $null
+        }
+
+        # Final UI update to 100%
+        $ScanProgress.Value = 100
+        $ProgressLabel.Text = "100%"
         Write-Console "Sector Scan Completed" "SpringGreen"
         $StatusLabel.Text = "Status: Sector Scan Completed"
         DoEvents
@@ -396,6 +494,15 @@ function Main-Process {
         [System.Windows.Forms.MessageBox]::Show("An error occurred: $_", "Error", "OK", "Error")
     }
     finally {
+        # Ensure disk stream is always closed
+        if ($diskStream) {
+            try {
+                $diskStream.Close()
+                $diskStream.Dispose()
+            } catch { }
+            $diskStream = $null
+        }
+
         # Re-enable UI
         $StartScan.Enabled = $true
         $CancelScan.Enabled = $false
