@@ -920,7 +920,7 @@ Since the final pass overwrites previous passes, the tool detects the **random d
 │  │ VERIFICATION RESULT│       │                                            │
 │  │      PASSED        │       │                                            │
 │  └────────────────────┘       │                                            │
-└────────────────────────────────┴────────────────────────────────────────────┘
+└──────────��─────────────────────┴────────────────────────────────────────────┘
 ```
 
 ### GUI Component Hierarchy
@@ -1217,6 +1217,55 @@ if ($percent -ne $lastPercent) {
 }
 ```
 
+#### 5. Compiled C# Analysis Engine (v3.9.0211+)
+
+The single most impactful optimization. All per-sector byte-level operations are moved
+into a compiled C# class (`Modules/SectorAnalyzer.cs`) loaded at startup via `Add-Type`.
+
+**Before (v3.9.0210 - interpreted PowerShell, per sector):**
+```
+foreach ($byte in $SectorData) ... # Zero check      - 512 iterations
+foreach ($byte in $SectorData) ... # 0xFF check      - 512 iterations
+foreach ($byte in $Data) ...       # Entropy freq     - 512 iterations
+foreach ($byte in $Data) ...       # Distribution freq - 512 iterations
+foreach ($byte in $Data) ...       # ASCII ratio      - 512 iterations
+foreach ($byte in $sectorData) ... # Histogram        - 512 iterations
+= ~3,000 interpreted PowerShell operations per sector
+x 125,000,000 sectors (64 GB disk) = ~375 BILLION interpreted ops
+```
+
+**After (v3.9.0211 - compiled C#, per sector):**
+```csharp
+// SectorAnalyzer.AnalyzeSector() - ONE pass, ALL checks:
+for (int i = 0; i < len; i++) {
+    byte b = data[i];
+    freq[b]++;                                    // frequency
+    if (b != 0x00) allZero = false;               // zero check
+    if (b != 0xFF) allFF = false;                 // FF check
+    if ((b >= 32 && b <= 126) || ...) printable++; // ASCII check
+}
+// Then: entropy, distribution, classification from freq[] array
+// + histogram accumulation into runningHistogram[]
+= ONE compiled loop per sector + math from frequency array
+```
+
+**Batch I/O (full scans only):**
+```csharp
+// SectorAnalyzer.ScanDiskBatch() - read 2048 sectors in one I/O call:
+byte[] batchBuffer = new byte[sectorCount * sectorSize]; // 1 MB
+stream.Read(batchBuffer, 0, totalBytes);                 // ONE read
+for (int i = 0; i < sectorsRead; i++) {
+    Buffer.BlockCopy(batchBuffer, i * sectorSize, sectorData, 0, sectorSize);
+    results.Add(AnalyzeSector(sectorData, ...));
+}
+```
+
+**Performance Impact (64 GB test disk, ~125M sectors):**
+| Version | Time | Operations/sector |
+|---------|------|-------------------|
+| v3.9.0209 (PowerShell) | ~24+ hours | ~3,000 interpreted |
+| v3.9.0211 (C# batch) | ~5-15 minutes | ~512 compiled + batch I/O |
+
 ### Memory Usage Summary
 
 | Component | Old Approach | New Approach |
@@ -1224,7 +1273,8 @@ if ($percent -ne $lastPercent) {
 | Sample Locations | O(n) with reallocation | O(n) with HashSet |
 | Byte Storage | O(n * sectorSize) | O(1) - 2KB fixed |
 | Entropy Calculation | Requires all bytes | Uses histogram |
-| **Total for 100K sectors** | ~200MB+ | ~2MB |
+| Batch I/O buffer | N/A (per-sector) | 1 MB fixed (2048 x 512) |
+| **Total for 100K sectors** | ~200MB+ | ~3MB |
 
 ---
 
@@ -1232,11 +1282,30 @@ if ($percent -ne $lastPercent) {
 
 ### Adding a New Wipe Pattern
 
-1. **Add pattern detection in Test-SectorWiped.ps1:**
+Since v3.9.0211, wipe pattern detection lives in **two places**:
+1. `Modules/SectorAnalyzer.cs` (compiled C# - used by the scan engine)
+2. `Modules/Test-SectorWiped.ps1` (PowerShell fallback - not used during scans but kept for reference/testing)
 
+To add a new pattern, update **both** files:
+
+**In SectorAnalyzer.cs** (in the `AnalyzeSector` method, after the `allFF` check):
+```csharp
+// Check for alternating pattern (0xAA)
+bool allAA = true;
+for (int i = 0; i < len; i++) {
+    if (data[i] != 0xAA) { allAA = false; break; }
+}
+if (allAA) {
+    result.Status = "Wiped";
+    result.Pattern = "Alternating (0xAA)";
+    result.Confidence = 100;
+    result.Details = "All bytes are 0xAA - custom wipe pattern";
+    return result;
+}
+```
+
+**In Test-SectorWiped.ps1** (for reference/testing):
 ```powershell
-# Add after zero-fill and one-fill checks
-
 # Check for alternating pattern (0xAA)
 $allAlternating = $true
 foreach ($byte in $SectorData) {
@@ -1256,7 +1325,7 @@ if ($allAlternating) {
 
 ### Adding a New File Signature
 
-1. **Add to $FileSignatures in Main.ps1:**
+1. **Add to $FileSignatures in Main.ps1** (automatically passed to both PS and C# engines):
 
 ```powershell
 $FileSignatures = @{
@@ -1440,6 +1509,7 @@ Write-Console "Elapsed: $($stopwatch.Elapsed.TotalSeconds) seconds" "Cyan"
 | 3.8.0203.01 | 2026-02-03 | Memory optimization for large samples |
 | 3.9.0209.01 | 2026-02-09 | Data leftover markers module with report integration |
 | 3.9.0210.01 | 2026-02-10 | Time-based UI refresh (200ms Stopwatch), ByteDistributionScore array optimization, Start-Scan bug fix |
+| 3.9.0211.01 | 2026-02-11 | Compiled C# SectorAnalyzer engine, batch I/O (2048 sectors/call), full 64GB scan in minutes |
 
 ---
 

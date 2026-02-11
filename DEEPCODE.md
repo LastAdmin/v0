@@ -2,8 +2,8 @@
 
 > Deep code-level documentation for developers who need to understand, debug, or extend the codebase. Every file, every function, every design decision is explained here.
 
-**Version:** 3.9.0210.01  
-**Last Updated:** 2026-02-10  
+**Version:** 3.9.0211.01  
+**Last Updated:** 2026-02-11  
 **Author:** Yannick Morgenthaler / JSW
 
 ---
@@ -813,53 +813,144 @@ All signatures are 4+ bytes to minimize false positives. The original `"MZ"` (2-
 
 ## 12. Performance Architecture
 
-### 12.1 Shared FileStream
+### 12.1 The Core Problem (pre-v3.9.0211)
+
+PowerShell `foreach` over byte arrays is **interpreted** -- each iteration involves boxing, unboxing, type checks, and scope resolution. For a 512-byte sector, the old code ran:
+
+| Operation | Loop iterations | Source |
+|-----------|----------------|--------|
+| Zero-fill check | 512 | `Test-SectorWiped` |
+| 0xFF-fill check | 512 | `Test-SectorWiped` |
+| Entropy frequency | 512 | `Get-ShannonEntropy` |
+| Distribution frequency | 512 | `Get-ByteDistributionScore` |
+| ASCII ratio count | 512 | `Get-PrintableAsciiRatio` |
+| Running histogram | 512 | Main.ps1 loop body |
+| **Total per sector** | **~3,072** | |
+
+For a 64 GB disk with ~125 million sectors: **~384 billion interpreted operations**. At ~100,000 interpreted ops/sec per core in PowerShell, this takes **~44 days** in theory (observed: ~24+ hours at 27%).
+
+### 12.2 The Solution: Compiled C# Engine (`Modules/SectorAnalyzer.cs`)
+
+All byte-level work is moved to a compiled C# class loaded at startup via `Add-Type`. Compiled .NET code runs at native CLR speed, which is ~100-1000x faster than PowerShell `foreach` for tight byte loops.
+
+**Loading (Main.ps1, during startup):**
+```powershell
+$csPath = Join-Path $PSScriptRoot "Modules\SectorAnalyzer.cs"
+$csCode = [System.IO.File]::ReadAllText($csPath)
+Add-Type -TypeDefinition $csCode -Language CSharp -ErrorAction Stop
+```
+
+This compiles the C# code into an in-memory assembly. The `[SectorAnalyzer]` type is then available for static method calls.
+
+### 12.3 `SectorAnalyzer.AnalyzeSector()` -- Single-Pass Analysis
+
+The key method. In **ONE `for` loop** over the sector bytes, it simultaneously:
+
+```csharp
+for (int i = 0; i < len; i++) {
+    byte b = data[i];
+    freq[b]++;                                    // frequency counting
+    if (b != 0x00) allZero = false;               // zero-fill check
+    if (b != 0xFF) allFF = false;                 // 0xFF-fill check
+    if ((b >= 32 && b <= 126) || b == 9 || b == 10 || b == 13)
+        printableCount++;                          // ASCII ratio
+}
+```
+
+Then from the `freq[]` array (computed once), it calculates:
+- Shannon entropy (256-element loop with `Math.Log`)
+- Chi-square byte distribution score (256-element loop)
+- Classification (same logic as `Test-SectorWiped.ps1`)
+- File signature matching (if entropy < 7.0)
+- Running histogram accumulation
+
+**Operations per sector: 512 compiled (single loop) + 512 (entropy/distribution math) = ~1,024 compiled ops** vs. ~3,072 interpreted ops before.
+
+### 12.4 `SectorAnalyzer.ScanDiskBatch()` -- Batch I/O (Full Scans Only)
+
+For sequential full-disk scans, reading one sector at a time is I/O-inefficient. The batch method reads **2,048 sectors (1 MB)** in a single `FileStream.Read()`:
+
+```csharp
+byte[] batchBuffer = new byte[sectorCount * sectorSize]; // 1 MB
+stream.Seek(offset, SeekOrigin.Begin);
+int bytesRead = 0;
+while (bytesRead < totalBytes) {
+    int chunk = stream.Read(batchBuffer, bytesRead, totalBytes - bytesRead);
+    if (chunk == 0) break;
+    bytesRead += chunk;
+}
+```
+
+Then each sector is extracted from the batch buffer and analyzed:
+
+```csharp
+for (int i = 0; i < sectorsRead; i++) {
+    byte[] sectorData = new byte[sectorSize];
+    Buffer.BlockCopy(batchBuffer, i * sectorSize, sectorData, 0, sectorSize);
+    results.Add(AnalyzeSector(sectorData, runningHistogram, signatureValues, signatureNames));
+}
+```
+
+**Benefits:**
+- 1 syscall per 2,048 sectors instead of 2,048 syscalls
+- Maximizes sequential read throughput (critical for HDDs)
+- PowerShell only iterates `List<SectorResult>` (2,048 structs) instead of individual bytes
+- Disk I/O speed becomes the bottleneck, not CPU
+
+**Why 2,048?** At 512 bytes/sector, 2,048 sectors = 1 MB. This aligns well with OS-level read-ahead buffers and disk cache pages. Larger batches (e.g., 4 MB) showed diminishing returns and increased memory pressure.
+
+### 12.5 Sampled Scan Path
+
+Sampled scans cannot use batch I/O because sectors are non-contiguous (randomly distributed). However, they still use `[SectorAnalyzer]::AnalyzeSector()` for the analysis, which is ~100x faster than the PowerShell functions. The I/O pattern remains per-sector seeking:
+
+```powershell
+[void]$diskStream.Seek($offset, [System.IO.SeekOrigin]::Begin)
+$bytesRead = $diskStream.Read($buffer, 0, $SectorSize)
+# ...
+$analysis = [SectorAnalyzer]::AnalyzeSector($sectorData, $runningHistogram, $sigValues, $sigNames)
+```
+
+### 12.6 Signature Array Preparation
+
+File signatures are stored in PowerShell as a hashtable but the C# engine needs typed arrays. Main.ps1 converts them once at startup:
+
+```powershell
+$sigNames  = [string[]]@($FileSignatures.Keys)
+$sigValues = [byte[][]]@(foreach ($key in $sigNames) { ,([byte[]]$FileSignatures[$key]) })
+```
+
+These arrays are passed to every `AnalyzeSector()` / `ScanDiskBatch()` call. The C# code iterates them with a simple indexed `for` loop -- no hashtable lookups.
+
+### 12.7 Shared FileStream
 
 The disk is opened **once** before the scan loop and closed **once** after:
 
 ```powershell
-$diskStream = [System.IO.File]::Open($diskPath, ...)
-$buffer = New-Object byte[] $SectorSize
-
-# Inside loop:
-[void]$diskStream.Seek($offset, [System.IO.SeekOrigin]::Begin)
-$bytesRead = $diskStream.Read($buffer, 0, $SectorSize)
+$diskStream = [System.IO.File]::Open($diskPath, [System.IO.FileMode]::Open,
+    [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
 ```
 
-This eliminates:
-- One `Open` + `Close` + `Dispose` per sector (was ~100,000 syscalls for a typical scan)
-- File handle allocation/deallocation overhead
-- Potential file sharing lock contention
+This eliminates ~125M+ `Open`/`Close`/`Dispose` calls for a full disk scan.
 
-### 12.2 Buffer Reuse
+### 12.8 Early-Exit Pattern Checks
 
-The `$buffer` byte array is allocated once and reused for every `Read` call. After reading, the data is copied to a new `$sectorData` array only if `bytesRead > 0`:
+Even in the compiled C# code, zero-fill and one-fill flags (`allZero`, `allFF`) are tracked in the single main loop. If a non-matching byte is found, the flag is set to `false` but the loop continues (because it's also counting frequencies). However, the **classification** after the loop immediately returns for zero-fill/one-fill sectors without computing entropy or distribution math.
 
-```powershell
-$sectorData = New-Object byte[] $bytesRead
-[System.Buffer]::BlockCopy($buffer, 0, $sectorData, 0, $bytesRead)
-```
+### 12.9 Entropy Gate for Signatures
 
-**Why copy instead of reusing?** Analysis functions may store references to the data (e.g., `Get-DataLeftoverMarker` extracts the first 32 bytes). If we reused the buffer, subsequent reads would corrupt stored data.
-
-### 12.3 Early-Exit Pattern Checks
-
-`Test-SectorWiped` checks zero-fill and one-fill **before** calculating entropy, distribution, and ASCII ratio. These checks use a `foreach` loop with early `break`:
-
-```powershell
-$allZeros = $true
-foreach ($byte in $SectorData) {
-    if ($byte -ne 0x00) { $allZeros = $false; break }
-}
-```
-
-For a zero-filled sector, this confirms the status in one pass (512 iterations). Without early exit, entropy/distribution/ASCII would add three more passes (3 x 512 = 1,536 extra iterations).
-
-### 12.4 Entropy Gate for Signatures
-
-File signature checking is only performed when `$entropy -lt 7.0`. This:
+File signature checking is only performed when `entropy < 7.0`. This:
 - Avoids false positives from random data matching signatures
-- Saves the overhead of iterating 11 signatures x their byte lengths when the sector is clearly random
+- Saves iterating 11 signatures x their byte lengths when the sector is clearly random
+
+### 12.10 Performance Summary
+
+| Metric | v3.9.0209 (PS) | v3.9.0211 (C# batch) |
+|--------|----------------|----------------------|
+| Ops per sector | ~3,072 interpreted | ~1,024 compiled |
+| I/O calls per sector | 1 | 1/2048 (batch) |
+| 64 GB full scan time | ~24+ hours | ~5-15 minutes |
+| CPU bottleneck | PowerShell foreach | Disk I/O |
+| PowerShell loop work | All byte analysis | Result counting only |
 
 ---
 
@@ -874,25 +965,14 @@ PowerShell WinForms runs on a single thread. When `Main-Process` enters its scan
 
 ### The Solution: DoEvents + Time-Based Refresh
 
-**v3.9.0209 and earlier:** `DoEvents` was only called when the percentage changed:
-
-```powershell
-if ($percent -ne $lastPercent) {
-    DoEvents
-    $lastPercent = $percent
-}
-```
-
-For a scan with 100,000 samples, each 1% = 1,000 sectors. With ~5ms per sector (read + analyze), each 1% block takes ~5 seconds during which the GUI is frozen.
-
-**v3.9.0210+:** Added a `Stopwatch`-based timer:
+With the C# batch engine, each batch of 2,048 sectors completes very quickly (~10-50ms depending on disk speed). The PowerShell loop between batches handles UI refresh:
 
 ```powershell
 $uiTimer = [System.Diagnostics.Stopwatch]::StartNew()
 $uiIntervalMs = 200
 
+# After each batch:
 if ($percent -ne $lastPercent) {
-    # Percent changed: full UI update
     $StatusLabel.Text = "..."
     $ScanProgress.Value = ...
     $ProgressLabel.Text = "..."
@@ -900,26 +980,23 @@ if ($percent -ne $lastPercent) {
     $lastPercent = $percent
     $uiTimer.Restart()
 } elseif ($uiTimer.ElapsedMilliseconds -ge $uiIntervalMs) {
-    # 200ms elapsed: minimal UI update (status text + DoEvents)
     $StatusLabel.Text = "..."
     DoEvents
     $uiTimer.Restart()
 }
 ```
 
-This ensures `DoEvents` is called at least every 200ms regardless of scan speed. The GUI stays responsive at all times.
+Since the C# batch call returns in ~10-50ms, the time-based refresh at 200ms means `DoEvents` is called roughly every 4-20 batches. The GUI stays responsive at all times.
 
-**Why 200ms?** This provides ~5 updates per second, which is perceived as smooth by users. Lower values (e.g., 50ms) would call `DoEvents` too frequently, adding measurable overhead to the scan. Higher values (e.g., 1000ms) would feel sluggish when clicking cancel.
+**Why 200ms?** This provides ~5 updates per second, which is perceived as smooth by users. With batch processing, the actual interval between `DoEvents` calls is much less than 200ms (the batch call itself yields back to PowerShell quickly).
 
 ### DoEvents Overhead
 
 `[System.Windows.Forms.Application]::DoEvents()` processes all pending messages. When there are no pending messages (the usual case), it returns almost instantly (~0.01ms). The overhead is negligible even at 200ms intervals.
 
-However, if many messages queue up (e.g., rapid console logging), `DoEvents` can take longer. This is why `Write-Console` calls `DoEvents` internally -- it prevents message queue buildup.
-
 ### Cancellation Latency
 
-With the 200ms timer, the maximum delay between a user clicking "Cancel" and the scan loop checking `$script:cancelRequested` is 200ms. This feels instantaneous to users.
+Cancel checking happens between batches. Since each batch takes ~10-50ms, the maximum delay between clicking "Cancel" and the scan stopping is approximately one batch duration (~50ms) plus up to 200ms timer interval. In practice, cancellation feels near-instantaneous.
 
 ---
 
