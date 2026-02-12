@@ -82,6 +82,51 @@ function Load-GUI {
     $MainWindow.MaximizeBox = $false
 
     ##########################################
+    # Menu Bar
+    ##########################################
+    $MenuStrip = New-Object System.Windows.Forms.MenuStrip
+    $MenuStrip.BackColor = Color 50 50 50
+    $MenuStrip.ForeColor = Color 255 255 255
+
+    # Options Menu
+    $OptionsMenu = New-Object System.Windows.Forms.ToolStripMenuItem
+    $OptionsMenu.Text = "Options"
+    $OptionsMenu.ForeColor = Color 255 255 255
+
+    # Debug Mode Toggle
+    $DebugModeItem = New-Object System.Windows.Forms.ToolStripMenuItem
+    $DebugModeItem.Text = "Debug Mode"
+    $DebugModeItem.CheckOnClick = $true
+    $DebugModeItem.Checked = $false
+    $DebugModeItem.ToolTipText = "Enable sample size and full disk checkbox for debug runs"
+    $DebugModeItem.ForeColor = Color 255 255 255
+
+    $DebugModeItem.Add_CheckedChanged({
+        if ($DebugModeItem.Checked) {
+            # Enable debug controls
+            $FullDiskCheckBox.Enabled = $true
+            $SampleSize.Enabled = -not $FullDiskCheckBox.Checked
+            if ($SampleSize.Enabled) {
+                $SampleSize.BackColor = Color 100 100 100
+            }
+            $MainWindow.Text = "Disk Report [DEBUG MODE]"
+        } else {
+            # Disable debug controls, force full disk scan
+            $FullDiskCheckBox.Checked = $true
+            $FullDiskCheckBox.Enabled = $false
+            $SampleSize.Enabled = $false
+            $SampleSize.BackColor = Color 15 15 15
+            $MainWindow.Text = "Disk Report"
+        }
+        DoEvents
+    })
+
+    $OptionsMenu.DropDownItems.Add($DebugModeItem) | Out-Null
+    $MenuStrip.Items.Add($OptionsMenu) | Out-Null
+    $MainWindow.MainMenuStrip = $MenuStrip
+    $MainWindow.Controls.Add($MenuStrip)
+
+    ##########################################
     # Elements
     ##########################################
 

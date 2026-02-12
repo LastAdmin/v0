@@ -382,9 +382,9 @@ function Main-Process {
             "NOT VERIFIED - Recoverable Data Detected"
         }
 
-        $statusColor = if ($OverallStatus -eq "VERIFIED*") {
+        $statusColor = if ($overallStatus -like "VERIFIED*") {
             "SpringGreen"
-        } elseif ($OverallStatus -eq "MOSTLY*") {
+        } elseif ($overallStatus -like "MOSTLY*") {
             "Yellow"
         } else {
             "Red"

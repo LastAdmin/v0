@@ -14,9 +14,9 @@ function New-HtmlReport {
         [long]$TotalLeftoverCount = 0
     )
 
-    $statusClass = if ($OverallStatus -eq "VERIFIED*") {
+    $statusClass = if ($OverallStatus -like "VERIFIED*") {
         "verified"
-    } elseif ($OverallStatus -eq "MOSTLY*") {
+    } elseif ($OverallStatus -like "MOSTLY*") {
         "warning"
     } else {
         "failed"
