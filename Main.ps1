@@ -227,7 +227,12 @@ function Main-Process {
                 $bytesToRead = [int]($currentChunkSectors * $SectorSize)
 
                 # Single I/O read for the entire chunk (sequential = no seek needed)
-                $bytesRead = $diskStream.Read($chunkBuffer, 0, $bytesToRead)
+                try {
+                    $bytesRead = $diskStream.Read($chunkBuffer, 0, $bytesToRead)
+                }
+                catch {
+                    $bytesRead = 0
+                }
 
                 if ($bytesRead -le 0) {
                     # End of readable area
@@ -237,8 +242,19 @@ function Main-Process {
                     continue
                 }
 
-                # Process the entire chunk in compiled C# (one call for all sectors)
-                $chunkStats = [DiskAnalysisEngine]::AnalyzeChunk($chunkBuffer, $bytesRead, $SectorSize, $patternCounts, [long]$sectorIndex)
+                # Adjust actual sector count if a partial read occurred at the end of the disk
+                $actualSectorsRead = [math]::Floor($bytesRead / $SectorSize)
+                if ($actualSectorsRead -le 0) {
+                    $results.Unreadable += $currentChunkSectors
+                    $sectorIndex += $currentChunkSectors
+                    $progress += $currentChunkSectors
+                    continue
+                }
+                $unreadableInChunk = $currentChunkSectors - $actualSectorsRead
+                if ($unreadableInChunk -gt 0) { $results.Unreadable += $unreadableInChunk }
+
+                # Process only the bytes that were actually read
+                $chunkStats = [DiskAnalysisEngine]::AnalyzeChunk($chunkBuffer, [int]($actualSectorsRead * $SectorSize), $SectorSize, $patternCounts, [long]$sectorIndex)
 
                 $results.Wiped      += $chunkStats.Wiped
                 $results.NotWiped   += $chunkStats.NotWiped
@@ -281,17 +297,24 @@ function Main-Process {
                 $progress++
 
                 $offset = [long]$sectorNum * $SectorSize
-                $diskStream.Seek($offset, [System.IO.SeekOrigin]::Begin) | Out-Null
-                $bytesRead = $diskStream.Read($readBuffer, 0, $SectorSize)
 
-                if ($bytesRead -le 0) {
+                # Guard: skip sectors beyond the readable stream length
+                try {
+                    $diskStream.Seek($offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                    $bytesRead = $diskStream.Read($readBuffer, 0, $SectorSize)
+                }
+                catch {
+                    $bytesRead = 0
+                }
+
+                if ($bytesRead -lt $SectorSize) {
                     $results.Unreadable++
                     if (-not $patternCounts.ContainsKey("N/A")) { $patternCounts["N/A"] = 0 }
                     $patternCounts["N/A"]++
                     continue
                 }
 
-                # Analyze single sector in compiled C# (no byte[] copy needed - engine reads from offset)
+                # Analyze single sector in compiled C#
                 $sectorResult = [DiskAnalysisEngine]::AnalyzeSector($readBuffer, 0, $SectorSize)
 
                 switch ($sectorResult.Status) {

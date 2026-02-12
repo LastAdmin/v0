@@ -21,26 +21,30 @@ function Get-SampleLocations {
     # Use a HashSet<long> for O(1) deduplication instead of Select-Object -Unique
     $locationSet = New-Object 'System.Collections.Generic.HashSet[long]'
 
+    # Safe max: exclude the last 2 sectors which are often beyond the readable area
+    # (disk firmware/HPA/DCO can make the last sectors unreachable)
+    [long]$safeMax = [math]::Max(0, $TotalSectors - 2)
+
     # First 100 sectors (or fewer if disk is small)
-    $headCount = [math]::Min(100, $TotalSectors)
+    $headCount = [math]::Min(100, $safeMax)
     for ([long]$i = 0; $i -lt $headCount; $i++) {
         $locationSet.Add($i) | Out-Null
     }
 
-    # Last 100 sectors
-    $tailStart = [math]::Max(0, $TotalSectors - 100)
-    for ([long]$i = $tailStart; $i -lt $TotalSectors; $i++) {
+    # Last 100 sectors (within safe range)
+    $tailStart = [math]::Max(0, $safeMax - 100)
+    for ([long]$i = $tailStart; $i -lt $safeMax; $i++) {
         $locationSet.Add($i) | Out-Null
     }
 
     # Random samples from the middle region
     $remaining = $SampleSize - $locationSet.Count
-    if ($remaining -gt 0 -and $TotalSectors -gt 200) {
+    if ($remaining -gt 0 -and $safeMax -gt 200) {
         $random = New-Object System.Random
 
         # The middle range to sample from (between head and tail)
         [long]$rangeStart = 100
-        [long]$rangeEnd = $TotalSectors - 100
+        [long]$rangeEnd = $safeMax - 100
         [long]$rangeSize = $rangeEnd - $rangeStart
 
         # Safety limit: don't spin forever if range is nearly exhausted
