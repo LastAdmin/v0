@@ -1,345 +1,309 @@
-# Deep Code Documentation
+# DEEPCODE - Disk Wipe Verification Tool
 
-Complete code-level documentation of every file, function, data structure, and algorithm in the Disk Wipe Verification Tool. This document is intended for expert developers who need to understand the full internal workings.
+> Deep code-level documentation for developers who need to understand, debug, or extend the codebase. Every file, every function, every design decision is explained here.
+
+**Version:** 4.0
+**Last Updated:** 2026-02-13
+**Author:** Yannick Morgenthaler / JSW
 
 ---
 
 ## Table of Contents
 
-1. [Entry Point & Bootstrap Chain](#1-entry-point--bootstrap-chain)
-2. [GUI Framework](#2-gui-framework)
-3. [Connectors](#3-connectors)
-4. [Core Scan Logic (Main.ps1)](#4-core-scan-logic-mainps1)
-5. [Compiled C# Analysis Engine](#5-compiled-c-analysis-engine)
-6. [Legacy PowerShell Analysis Modules](#6-legacy-powershell-analysis-modules)
-7. [Report Generation](#7-report-generation)
-8. [Data Flow Diagram](#8-data-flow-diagram)
+1. [Execution Model](#1-execution-model)
+2. [Bootstrap Chain](#2-bootstrap-chain)
+3. [Global State and Scope](#3-global-state-and-scope)
+4. [GUI Framework](#4-gui-framework)
+5. [Scan Lifecycle](#5-scan-lifecycle)
+6. [Compiled C# Analysis Engine](#6-compiled-c-analysis-engine)
+7. [Legacy PowerShell Analysis Modules](#7-legacy-powershell-analysis-modules)
+8. [Connector Functions](#8-connector-functions)
+9. [GUI Action Modules](#9-gui-action-modules)
+10. [GUI Element Definitions](#10-gui-element-definitions)
+11. [GUI Element Factories](#11-gui-element-factories)
+12. [Data Structures In-Depth](#12-data-structures-in-depth)
+13. [Performance Architecture](#13-performance-architecture)
+14. [Threading Model and GUI Responsiveness](#14-threading-model-and-gui-responsiveness)
+15. [Error Handling Strategy](#15-error-handling-strategy)
+16. [Report Generation Pipeline](#16-report-generation-pipeline)
+17. [Known Limitations and Edge Cases](#17-known-limitations-and-edge-cases)
+18. [Changelog (Code-Level)](#18-changelog-code-level)
 
 ---
 
-## 1. Entry Point & Bootstrap Chain
+## 1. Execution Model
 
-### EXE.ps1
+The application is a **single-threaded** PowerShell Windows Forms application. All code -- GUI rendering, disk I/O, analysis, and report generation -- executes on the same thread. There is no background worker, no `RunspacePool`, and no `System.Threading.Tasks`.
 
-```
-#Requires -RunAsAdministrator
-. .\Load-Components.ps1
-Load-Components
-```
+This design was chosen for simplicity and because PowerShell's `$script:` scoping and dot-sourced functions do not naturally support multi-threaded execution. The trade-off is that long-running operations (the scan loop) must periodically yield control to the Windows Forms message pump via `[System.Windows.Forms.Application]::DoEvents()` to keep the GUI responsive.
 
-The outermost entry point. The `#Requires -RunAsAdministrator` directive ensures the process has elevated privileges (needed for raw disk access via `\\.\PhysicalDriveN`). It dot-sources `Load-Components.ps1` and calls the `Load-Components` function.
+**Key implication:** Any blocking call (e.g., a slow disk read, a stalled `Start-Process` for PDF conversion) will freeze the GUI until it returns. The codebase mitigates this with time-based `DoEvents` calls (see [Section 14](#14-threading-model-and-gui-responsiveness)).
 
-**Design intent:** This file is designed to be converted into a standalone `.exe` via PS2EXE. Keeping it minimal means the bootstrap logic can be updated independently.
-
-### Load-Components.ps1
-
-```powershell
-function Load-Components {
-    . .\Main.ps1      # Defines Main-Process function
-    . .\Index.ps1      # Loads all Modules + Connectors
-    . .\GUI\GUI.ps1    # Defines Load-GUI function
-    Load-GUI           # Opens the window
-}
-```
-
-Dot-sources the three major subsystems in order, then calls `Load-GUI`. This is the only function that directly triggers the GUI.
-
-**Load order matters:** `Main.ps1` must be loaded before `GUI.ps1` because the Start-Scan event handler calls `Main-Process`, which must already be defined.
-
-### Index.ps1
-
-Loads all module and connector files into the session scope:
-
-```
-Modules:   Convert-HtmlToPdf, Get-AvailableDisks, Get-ByteDistributionScore,
-           Get-ByteHistogram, Get-PrintableAsciiRatio, Get-SampleLocations,
-           Get-ShannonEntropy, New-HtmlReport, Read-DiskSector,
-           Test-FileSignatures, Test-SectorWiped
-Connectors: DoEvents, Get-Parameters, Write-Console
-```
-
-**Note:** The compiled C# engine (`DiskAnalysisEngine.ps1`) is NOT loaded here. It is loaded inside `Main-Process` to ensure it is compiled fresh each session (the `Add-Type` call is idempotent but must happen before any engine methods are called).
+**Performance architecture:** All byte-level analysis runs in compiled C# code (via `Add-Type`) rather than interpreted PowerShell. PowerShell handles only I/O, orchestration, and UI updates.
 
 ---
 
-## 2. GUI Framework
+## 2. Bootstrap Chain
 
-### GUI/GUI.ps1 -- `Load-GUI`
+The application boots through a strict chain of dot-sourced files. Understanding this chain is critical because **PowerShell dot-sourcing executes code in the caller's scope**, meaning every variable and function defined in a dot-sourced file becomes available in the scope that called it.
 
-The main function that builds and displays the WinForms application.
-
-**Execution sequence:**
-
-1. **Load ActionModules** -- Event handler functions: `Browse-Path`, `DataGridView-DoubleClick`, `Full-DiskScan`, `Disk-List`, `Load-Disks`, `Start-Scan`, `Cancel-Scan`
-2. **Load BaseSettings** -- Common color/font definitions, helper `Color` function
-3. **Load NewElement factories** -- Functions like `New-Button`, `New-Label`, etc. that create WinForms controls with consistent defaults
-4. **Create MainWindow** -- `System.Windows.Forms.Form` with fixed size 1000x700, dark background (#191919), non-resizable
-5. **Create elements** -- Each element file creates a global variable (e.g., `$ScanProgress`, `$StatusLabel`)
-6. **Wire event handlers** -- `.Add_Click()`, `.Add_CheckedChanged()`, `.Add_SelectedIndexChanged()` bindings
-7. **Load-Disks** -- Initial disk enumeration on launch
-8. **ShowDialog** -- Blocking call that runs the message loop until the window closes
-
-### GUI/Elements/ -- Individual Controls
-
-Each file creates one or more WinForms controls and adds them to a parent container. Pattern:
-
-```powershell
-# Example: ScanProgress.ps1
-$ScanProgress = New-ProgressBar -Name "ScanProgress" -Location "20,380" -Size "340,25"
-$GroupBoxL.Controls.Add($ScanProgress)
+```
+EXE.ps1
+  |
+  +-- . .\Load-Components.ps1          # Defines Load-Components function
+  |     |
+  |     +-- calls Load-Components
+  |           |
+  |           +-- . .\Main.ps1          # Defines Main-Process function
+  |           +-- . .\Index.ps1         # Dot-sources all Modules/ and Connectors/
+  |           |     |
+  |           |     +-- . .\Modules\Get-ShannonEntropy.ps1
+  |           |     +-- . .\Modules\Get-ByteDistributionScore.ps1
+  |           |     +-- . .\Modules\Test-SectorWiped.ps1
+  |           |     +-- . .\Modules\Get-SampleLocations.ps1
+  |           |     +-- . .\Modules\Read-DiskSector.ps1
+  |           |     +-- . .\Modules\Get-ByteHistogram.ps1
+  |           |     +-- . .\Modules\Get-DataLeftoverMarkers.ps1
+  |           |     +-- . .\Modules\Get-PrintableAsciiRatio.ps1
+  |           |     +-- . .\Modules\Test-FileSignatures.ps1
+  |           |     +-- . .\Modules\New-HtmlReport.ps1
+  |           |     +-- . .\Modules\Convert-HtmlToPdf.ps1
+  |           |     +-- . .\Modules\Get-AvailableDisks.ps1
+  |           |     +-- . .\Connectors\DoEvents.ps1
+  |           |     +-- . .\Connectors\Get-Parameters.ps1
+  |           |     +-- . .\Connectors\Write-Console.ps1
+  |           |
+  |           +-- . .\GUI\GUI.ps1       # Defines Load-GUI function
+  |           |
+  |           +-- calls Load-GUI
+  |                 |
+  |                 +-- Dot-sources all GUI/ActionModules/*.ps1
+  |                 +-- Dot-sources all GUI/Elements/BaseSettings.ps1
+  |                 +-- Dot-sources all GUI/NewElements/*.ps1
+  |                 +-- Dot-sources all GUI/Elements/*.ps1
+  |                 +-- Creates MainWindow Form
+  |                 +-- Creates Menu Bar (Options > Debug Mode)
+  |                 +-- Wires event handlers
+  |                 +-- calls Load-Disks
+  |                 +-- calls $MainWindow.ShowDialog()   <-- BLOCKS HERE
+  |                 +-- (returns when window closes)
 ```
 
-**Key globals created by element files:**
+**Note:** The compiled C# engine (`DiskAnalysisEngine.ps1`) is NOT loaded via `Index.ps1`. It is loaded inside `Main-Process` to ensure it is compiled fresh each session (the `Add-Type` call is idempotent but must happen before any engine methods are called).
 
-| Variable | Type | File | Purpose |
-|----------|------|------|---------|
-| `$TechnicianName` | TextBox | TechnicianName.ps1 | Input for technician name |
-| `$SampleSize` | NumericUpDown | SampleSize.ps1 | Sample count selector |
-| `$SectorSize` | ComboBox | SectorSize.ps1 | Sector size dropdown (512, 1024, 2048, 4096) |
-| `$FullDiskCheckBox` | CheckBox | FullDiskCheckBox.ps1 | Toggle full disk vs sample scan |
-| `$ReportFormat` | ComboBox | ReportFormat.ps1 | HTML / PDF / Both |
-| `$ReportPath` | TextBox | ReportLocation.ps1 | Output folder path |
-| `$DiskList` | ListBox | DiskList.ps1 | Available disks selector |
-| `$Console` | RichTextBox | Console.ps1 | Colored log output |
-| `$ScanProgress` | ProgressBar | ScanProgress.ps1 | Scan progress bar |
-| `$ProgressLabel` | Label | ProgressLabel.ps1 | Percentage text |
-| `$StatusLabel` | Label | StatusLabel.ps1 | Current operation status |
-| `$StartScan` | Button | StartScan.ps1 | Trigger scan |
-| `$CancelScan` | Button | CancelScan.ps1 | Cancel running scan |
-| `$VerificationPanel` | Panel | VerificationPanel.ps1 | Result color indicator |
-| `$ResultLabel` | Label | ResultLabel.ps1 | Result text |
-| `$GroupBoxL` | GroupBox | GroupBoxL.ps1 | Left panel container |
-| `$GroupBoxR` | GroupBox | GroupBoxR.ps1 | Right panel container |
+### Why modules are loaded twice
 
-### GUI/NewElements/ -- Factory Functions
+You may notice that `Index.ps1` loads all modules at boot, but `Main-Process` also dot-sources them again inside its `try` block. This is intentional:
 
-Each file defines a function that creates a WinForms control with standard properties:
+1. **Index.ps1** loads modules into the `Load-GUI` scope so that functions like `Write-Console` and `DoEvents` are available during GUI setup.
+2. **Main-Process** re-loads modules to ensure the latest versions are available inside its function scope, which is important during development when files may change between runs.
 
-```powershell
-function New-Button {
-    param($Name, $Text, $Location, $Size, $ForeColor, $BackColor)
-    $btn = New-Object System.Windows.Forms.Button
-    $btn.Name = $Name
-    $btn.Text = $Text
-    # ... set Location, Size, Colors, Font
-    return $btn
-}
-```
-
-Available factories: `New-Button`, `New-CheckBox`, `New-ComboBox`, `New-DataGridView`, `New-GroupBox`, `New-Label`, `New-ListBox`, `New-NumericUpDown`, `New-Panel`, `New-ProgressBar`, `New-RichTextBox`, `New-StatusBar`, `New-StatusBarLabel`, `New-StatusBarProgressBar`, `New-TextBox`.
-
-### GUI/ActionModules/ -- Event Handlers
-
-#### Start-Scan.ps1 -- `Start-Scan`
-
-1. Validates a disk is selected and a technician name is entered
-2. Extracts disk number from `$DiskList.SelectedItem` via regex `"Disk (\d+)"`
-3. Shows confirmation dialog (read-only operation warning)
-4. Sets `$script:cancelRequested = $false`
-5. Disables Start button, enables Cancel button, disables disk list
-6. Reads parameters via `Get-Parameters`
-7. Logs parameters to console
-8. Calls `Main-Process`
-
-#### Cancel-Scan.ps1 -- `Cancel-Scan`
-
-Sets `$script:cancelRequested = $true`. The scan loop in `Main-Process` checks this flag at each chunk/sector boundary.
-
-#### Full-DiskScan.ps1 -- `Full-DiskScan`
-
-Toggles `$SampleSize.Enabled` based on `$FullDiskCheckBox.Checked`. When full disk is checked, the sample size input is disabled (it is not used).
-
-#### Load-Disks.ps1 -- `Load-Disks`
-
-Runs `Get-Disk`, populates `$DiskList` with entries like `"Disk 0 - Samsung SSD 870 (465.76 GB)"`.
-
-#### Browse-Path.ps1 -- `Browse-Path`
-
-Opens a `FolderBrowserDialog` and sets `$ReportPath.Text`.
-
-#### Disk-List.ps1 -- `Disk-List`
-
-Updates `$SectorInfoLabel` when a disk is selected, showing the total number of sectors.
+In a production build, the second load is redundant but harmless (function redefinition is a no-op if the file hasn't changed).
 
 ---
 
-## 3. Connectors
+## 3. Global State and Scope
 
-### DoEvents.ps1
+Because every file is dot-sourced, the entire application shares a **single flat scope**. There are no namespaces, no classes, and no modules (in the PowerShell module sense). All GUI controls, all functions, and all variables live in the same scope tree.
 
-```powershell
-function DoEvents {
-    [System.Windows.Forms.Application]::DoEvents()
-}
+### Key shared variables
+
+| Variable | Set Where | Used Where | Type | Description |
+|----------|-----------|-----------|------|-------------|
+| `$MainWindow` | GUI.ps1 | GUI.ps1 | `System.Windows.Forms.Form` | The main form |
+| `$Console` | Console.ps1 | Write-Console.ps1, Main.ps1 | `RichTextBox` | Log output panel |
+| `$StatusLabel` | StatusLabel.ps1 | Main.ps1, Start-Scan.ps1 | `Label` | Status text at bottom-left |
+| `$ScanProgress` | ScanProgress.ps1 | Main.ps1 | `ProgressBar` | Visual progress bar |
+| `$ProgressLabel` | ProgressLabel.ps1 | Main.ps1 | `Label` | Percentage text label |
+| `$DiskList` | DiskList.ps1 | Disk-List.ps1, Load-Disks.ps1, Start-Scan.ps1 | `ListBox` | Disk selection list |
+| `$SampleSize` | SampleSize.ps1 | Full-DiskScan.ps1, Get-Parameters.ps1 | `NumericUpDown` | Sample size input (disabled by default) |
+| `$SectorSize` | SectorSize.ps1 | Disk-List.ps1, Full-DiskScan.ps1, Get-Parameters.ps1 | `ComboBox` | Sector size dropdown |
+| `$StartScan` | StartScan.ps1 | Start-Scan.ps1, Main.ps1 | `Button` | Start button reference |
+| `$CancelScan` | CancelScan.ps1 | Start-Scan.ps1, Main.ps1 | `Button` | Cancel button reference |
+| `$VerificationPanel` | VerificationPanel.ps1 | Main.ps1, Start-Scan.ps1 | `Panel` | Result color panel |
+| `$ResultLabel` | ResultLabel.ps1 | Main.ps1, Start-Scan.ps1 | `Label` | Result text label |
+| `$FullDiskCheckBox` | FullDiskCheckBox.ps1 | Full-DiskScan.ps1, Disk-List.ps1 | `CheckBox` | Full scan toggle (checked+disabled by default) |
+| `$SectorInfoLabel` | SectorInfoLabel.ps1 | Disk-List.ps1, Full-DiskScan.ps1 | `Label` | Total sector count display |
+| `$TechnicianName` | TechnicianName.ps1 | Get-Parameters.ps1, Start-Scan.ps1 | `TextBox` | Technician name input |
+| `$ReportFormat` | ReportFormat.ps1 | Get-Parameters.ps1 | `ComboBox` | Report format dropdown |
+| `$ReportPath` | ReportLocation.ps1 | Get-Parameters.ps1, Browse-Path.ps1 | `TextBox` | Report output path |
+| `$script:cancelRequested` | Cancel-Scan.ps1 | Main.ps1 | `bool` | Cancellation flag |
+| `$FileSignatures` | Main.ps1 | Test-FileSignatures.ps1 | `hashtable` | Signature lookup table |
+| `$diskNumber` | Start-Scan.ps1 | Get-Parameters.ps1, Main.ps1 | `int` | Selected disk number |
+
+### The `$script:cancelRequested` pattern
+
+Cancellation uses a `$script:` scoped boolean. When the cancel button is clicked, `Cancel-Scan` sets `$script:cancelRequested = $true`. The scan loop in `Main-Process` checks this flag at the start of each iteration. Because the loop periodically calls `DoEvents`, the cancel button's click handler gets a chance to execute and set the flag.
+
 ```
-
-Pumps the Windows message queue. This is the mechanism that keeps the GUI responsive during long-running operations. Without it, the window would not repaint, and button clicks would not register.
-
-**Performance note:** This is an expensive call when invoked millions of times. The scan loop throttles it to every 250ms via a `Stopwatch`.
-
-### Get-Parameters.ps1
-
-```powershell
-function Get-Parameters {
-    $timestamp = Get-Date -Format "yyyMMdd_HHmmss"
-    @{
-        technician   = $TechnicianName.Text
-        diskNumber   = $diskNumber
-        sampleSize   = [int]$SampleSize.Value
-        sectorSize   = [int]$SectorSize.SelectedItem
-        reportFormat = $ReportFormat.SelectedItem
-        reportPath   = $ReportPath.Text
-        timestamp    = $timestamp
-        reportFile   = Join-Path $ReportPath.Text "\DiskWipeReport_$timestamp"
-    }
-}
+User clicks Cancel
+        |
+        v
+DoEvents is called in scan loop (every 250ms)
+        |
+        v
+Windows Forms processes pending messages
+        |
+        v
+CancelScan.Click handler fires -> $script:cancelRequested = $true
+        |
+        v
+Control returns to scan loop
+        |
+        v
+Loop checks $script:cancelRequested -> breaks
 ```
-
-Reads all GUI input fields into a single hashtable. Called in both `Start-Scan` (for logging) and `Main-Process` (for actual use).
-
-**Note:** `$diskNumber` comes from `Start-Scan`'s regex extraction, not from the GUI directly.
-
-### Write-Console.ps1
-
-```powershell
-function Write-Console($Message, $Color) {
-    if ($Color -eq $null) { $Color = "White" }
-    $timestamp = Get-Date -Format "HH:mm:ss"
-    $Console.SelectionStart = $Console.Text.Length
-    $Console.SelectionColor = $Color
-    $Console.AppendText("[$timestamp] $Message`r`n")
-    $Console.ScrollToCaret()
-    DoEvents
-}
-```
-
-Appends a timestamped, color-coded line to the `$Console` RichTextBox and scrolls to the bottom. Each call also pumps the message queue via `DoEvents` to ensure the text is immediately visible.
-
-**Color parameter:** Accepts any value valid for `System.Drawing.Color.FromName()` -- e.g., "Red", "Yellow", "SpringGreen", "Magenta", "Orange", "Gray", "White", "Info" (custom).
 
 ---
 
-## 4. Core Scan Logic (Main.ps1)
+## 4. GUI Framework
 
-### Function: `Main-Process`
+### Technology
 
-The central orchestration function. It runs inside a `try/catch/finally` block to ensure UI re-enablement on any error path.
+- **WinForms** via `System.Windows.Forms` (.NET Framework assembly loaded via `Add-Type`)
+- **GDI+** via `System.Drawing` for colors, fonts, and sizes
+- **No XAML, no WPF, no HTML** -- pure WinForms controls created in PowerShell
 
-#### Phase 1: Initialization (Lines ~53-100)
+### Helper functions (BaseSettings.ps1)
 
-1. Displays banner to console
-2. Reads parameters via `Get-Parameters` -> `$P`
-3. Sets local variables: `$Technician`, `$DiskNumber`, `$SampleSize`, `$SectorSize`, `$ReportFormat`, `$ReportPath`, `$ReportFile`
-4. Dot-sources all modules including `DiskAnalysisEngine.ps1`
+The `BaseSettings.ps1` file defines four utility functions used throughout all element definitions:
 
-#### Phase 2: Signature Setup (Lines ~104-128)
-
-Defines `$FileSignatures` as a hashtable mapping names to `[byte[]]` arrays:
-
-```
-PDF, ZIP/DOCX, JPEG, PNG, GIF87, GIF89, RAR, 7Z, SQLite, NTFS, EXE
+```powershell
+function Location($h, $w)     # Creates System.Drawing.Point for control positioning
+function Size($h, $w)         # Creates System.Drawing.Point for control sizing
+function FontSize($FS, $FW, $F)  # Creates System.Drawing.Font with optional bold and custom family
+function Color($R, $G, $B)    # Creates System.Drawing.Color from RGB values
 ```
 
-Extracts the keys and values into separate arrays and passes them to `[DiskAnalysisEngine]::SetSignatures()`.
+**Note on `Color`:** This function name shadows the .NET `Color` type. It works because PowerShell resolves function calls before type lookups.
 
-#### Phase 3: Disk Validation (Lines ~130-155)
+### Element factory pattern (GUI/NewElements/)
 
-Calls `Get-Disk -Number $DiskNumber`. If the disk does not exist, logs an error and exits. Otherwise extracts:
-
-- `$diskPath = "\\.\PhysicalDrive$DiskNumber"` -- the raw device path for `FileStream`
-- `$diskSize = $disk.Size` -- total capacity in bytes
-- `$totalSectors = [math]::Floor($diskSize / $SectorSize)` -- sector count
-
-Logs disk information (model, serial, size, total sectors, sample size, report format).
-
-#### Phase 4: Scan Mode Selection (Lines ~157-172)
-
-If `$FullDiskCheckBox.Checked`:
-- Sets `$totalSamples = $totalSectors`
-- No sample location generation
-
-If unchecked:
-- Calls `Get-SampleLocations -TotalSectors $totalSectors -SampleSize $sampleSize`
-- Sets `$totalSamples = $sampleLocations.Count`
-
-#### Phase 5: Engine Initialization (Lines ~174-212)
-
-1. `[DiskAnalysisEngine]::ResetGlobalCounters()` -- clears frequency table, byte count, ASCII count, leftovers
-2. Creates `$patternCounts` as `Dictionary<string,int>`
-3. Creates `$results` hashtable with Wiped/NotWiped/Suspicious/Unreadable counters
-4. Opens `$diskStream` via `[System.IO.File]::Open()` with `ReadWrite` share mode (allows other processes to access the disk)
-5. Allocates buffers:
-   - `$chunkBuffer` = 1 MB (2048 * SectorSize) for full disk sequential reads
-   - `$readBuffer` = SectorSize for individual sector reads (sample mode)
-6. Initializes `$lastUiUpdate` and `$scanTimer` Stopwatch objects
-
-#### Phase 6A: Full Disk Scan Loop (Lines ~214-271)
+Each `New-*.ps1` file defines a factory function for a specific control type. For example:
 
 ```
-while ($sectorIndex -lt $totalSectors) {
-    1. Check $script:cancelRequested
-    2. Calculate chunk size (min of 2048 sectors or remaining)
-    3. $diskStream.Read($chunkBuffer, 0, $bytesToRead)
-    4. [DiskAnalysisEngine]::AnalyzeChunk($chunkBuffer, $bytesRead, $SectorSize, $patternCounts, $sectorIndex)
-    5. Accumulate $results from ChunkStats
-    6. Every 250ms: update progress bar, percentage, speed (MB/s), ETA
-}
+New-Button       -> returns a configured System.Windows.Forms.Button
+New-CheckBox     -> returns a configured System.Windows.Forms.CheckBox
+New-ComboBox     -> returns a configured System.Windows.Forms.ComboBox
+New-DataGridView -> returns a configured System.Windows.Forms.DataGridView
+New-Label        -> returns a configured System.Windows.Forms.Label
+New-StatusBar    -> returns a configured System.Windows.Forms.StatusBar
+...
 ```
 
-**Key details:**
-- No `Seek` call needed -- sequential reads advance the stream position automatically
-- `$bytesRead -le 0` handles end-of-disk or unreadable regions
-- `AnalyzeChunk` receives `$sectorIndex` as `baseSectorIndex` so leftovers record correct absolute sector addresses
-- Speed calculated as `$progress / $scanTimer.Elapsed.TotalSeconds * SectorSize / 1MB`
-- ETA calculated as `($totalSamples - $progress) / sectorsPerSec`
+These factories accept parameters like location, size, text, font, and colors, applying the dark-theme defaults consistently.
 
-#### Phase 6B: Sample Scan Loop (Lines ~272-328)
+### Element definition pattern (GUI/Elements/)
+
+Each element `.ps1` file creates a specific control instance and adds it to its parent container. Because these files are dot-sourced in order within `GUI.ps1`, parent containers (like `$GroupBoxL`) must be created before their children.
+
+### Layout
+
+The form uses a two-panel layout with a menu bar:
 
 ```
-foreach ($sectorNum in $sampleLocations) {
-    1. Check $script:cancelRequested
-    2. $diskStream.Seek($offset, Begin)
-    3. $diskStream.Read($readBuffer, 0, $SectorSize)
-    4. [DiskAnalysisEngine]::AnalyzeSector($readBuffer, 0, $SectorSize)
-    5. Switch on status: increment $results, call RecordLeftover for status 1 or 2
-    6. Update $patternCounts dictionary
-    7. Every 250ms: update UI
-}
+$MainWindow (1000 x 700, fixed size, no maximize)
+  |
+  +-- $MenuBar (Options > Debug Mode toggle)
+  |
+  +-- $GroupBoxL (Left panel: parameters + scan controls + result)
+  |
+  +-- $GroupBoxR (Right panel: disk list + console log)
 ```
 
-**Key difference from full disk:** Each sector requires a `Seek` because sample locations are random. The `AnalyzeSector` call processes one sector and returns a `SectorResult`. Leftover recording is done explicitly from PowerShell (not inside the C# engine) because the engine's `AnalyzeSector` doesn't know the absolute sector number.
+All positioning is done with absolute pixel coordinates via `Location($x, $y)`. There is no layout manager, no auto-sizing, and no responsive behavior. The form has a fixed border style (`Fixed3D`) and `MaximizeBox = $false`.
 
-#### Phase 7: Post-Scan Calculations (Lines ~330-370)
+### Menu Bar and Debug Mode
 
-1. Close and dispose `$diskStream`
-2. Set progress to 100%, log scan duration
-3. `$overallEntropy = [DiskAnalysisEngine]::ComputeGlobalEntropy()` -- Shannon entropy from the global 256-bucket frequency table
-4. `$entropyPercent = Round(($overallEntropy / 8) * 100, 2)` -- as percentage of maximum (8 bits = perfectly random)
-5. Convert `$patternCounts` dictionary to `$results.Patterns` hashtable
-6. `$wipedPercent = Round(($results.Wiped / $totalSamples) * 100, 2)`
-7. Determine `$overallStatus`:
-   - >= 99.5% wiped -> "VERIFIED CLEAN - Disk Successfully Wiped"
-   - >= 95% wiped -> "MOSTLY CLEAN - Manual Review Recommended"
-   - < 95% -> "NOT VERIFIED - Recoverable Data Detected"
-8. Retrieve leftovers: `[DiskAnalysisEngine]::GetLeftovers()` and `::GetTotalLeftoverCount()`
+The GUI includes an "Options" menu with a "Debug Mode" toggle. When Debug Mode is enabled:
+- The FullDiskCheckBox is unlocked (user can uncheck it)
+- The SampleSize control is unlocked (user can set a custom sample count)
+- This enables smaller test runs during development
 
-#### Phase 8: Report Generation (Lines ~412-452)
+When Debug Mode is disabled:
+- FullDiskCheckBox is forced to checked and disabled
+- SampleSize is disabled with a darkened background
+- Full disk scan is the only available mode
 
-1. Calls `New-HtmlReport` with all computed data including leftovers
-2. Saves HTML to `$ReportFile.html`
-3. If PDF requested, calls `Convert-HtmlToPdf` with fallback chain
-4. Shows MessageBox offering to open the report
-5. Sets verification panel to green + "Verification Complete"
+### Event wiring
 
-#### Finally Block (Lines ~502-517)
+Event handlers are wired in `GUI.ps1` using `.Add_*()` methods:
 
-Always executes, regardless of success or error:
-1. Closes `$diskStream` if it is still open (safety net)
-2. Re-enables `$StartScan`, disables `$CancelScan`, re-enables `$DiskList`
+```powershell
+$FullDiskCheckBox.Add_CheckedChanged({ Full-DiskScan })
+$ReportPathButton.Add_Click({ Browse-Path })
+$DiskList.Add_SelectedIndexChanged({ Disk-List })
+$RefreshDisks.Add_Click({ Load-Disks })
+$CancelScan.Add_Click({ Cancel-Scan })
+$StartScan.Add_Click({ Start-Scan })
+```
+
+Each handler calls a function defined in a corresponding `GUI/ActionModules/*.ps1` file.
 
 ---
 
-## 5. Compiled C# Analysis Engine
+## 5. Scan Lifecycle
+
+The full lifecycle from button click to completion:
+
+```
+1. Start-Scan                          [GUI/ActionModules/Start-Scan.ps1]
+   |-- Validate disk selection
+   |-- Validate technician name
+   |-- Extract disk number from ListBox text via regex
+   |-- Show confirmation dialog
+   |-- Reset UI state (disable start, enable cancel, clear console)
+   |-- Log parameters to console
+   +-- Call Main-Process
+
+2. Main-Process                        [Main.ps1]
+   |-- Get-Parameters                  [Connectors/Get-Parameters.ps1]
+   |-- Re-load all modules (dot-source) including DiskAnalysisEngine.ps1
+   |-- Load file signature table -> pass to [DiskAnalysisEngine]::SetSignatures()
+   |-- Validate disk exists (Get-Disk)
+   |-- Log disk information
+   |-- Get-SampleLocations (if sample mode) [Modules/Get-SampleLocations.ps1]
+   |-- [DiskAnalysisEngine]::ResetGlobalCounters()
+   |-- Initialize results hashtable and patternCounts dictionary
+   |-- Open disk stream (single FileStream for entire scan)
+   |-- Initialize Stopwatch for UI timer
+   |
+   |-- SCAN LOOP (two paths):
+   |   |
+   |   +-- FULL DISK PATH:
+   |   |   |-- Read 1 MB chunk (2048 sectors) via sequential FileStream.Read
+   |   |   |-- [DiskAnalysisEngine]::AnalyzeChunk($buffer, $bytesRead, $sectorSize, $patternCounts, $baseSectorIndex)
+   |   |   |-- AnalyzeChunk internally calls AnalyzeSector for each sector
+   |   |   |-- AnalyzeChunk internally calls RecordLeftover for NOT Wiped/Suspicious
+   |   |   |-- Accumulate results from ChunkStats
+   |   |   |-- Every 250ms: update progress bar, percentage, speed (MB/s), ETA
+   |   |   +-- try/catch with partial-read handling for last chunk
+   |   |
+   |   +-- SAMPLE PATH:
+   |       |-- Check $script:cancelRequested
+   |       |-- Seek to sector offset + Read single sector
+   |       |-- [DiskAnalysisEngine]::AnalyzeSector($buffer, 0, $sectorSize)
+   |       |-- Switch on status: increment $results
+   |       |-- RecordLeftover called from PowerShell (engine doesn't know sector number)
+   |       |-- Update $patternCounts dictionary
+   |       +-- Every 250ms: update UI
+   |
+   |-- Close disk stream
+   |-- [DiskAnalysisEngine]::ComputeGlobalEntropy() -> overall entropy from 256-bucket frequency table
+   |-- Calculate wiped percentage
+   |-- Determine overall status (VERIFIED / MOSTLY / NOT VERIFIED)
+   |-- Retrieve leftovers: [DiskAnalysisEngine]::GetLeftovers() and ::GetTotalLeftoverCount()
+   |-- Log results to console
+   |-- New-HtmlReport                  [Modules/New-HtmlReport.ps1]
+   |-- (optional) Convert-HtmlToPdf    [Modules/Convert-HtmlToPdf.ps1]
+   |-- Show completion MessageBox
+   |-- Update verification panel
+   +-- Finally: close stream if still open, re-enable UI
+```
+
+---
+
+## 6. Compiled C# Analysis Engine
 
 ### File: Modules/DiskAnalysisEngine.ps1
 
@@ -384,7 +348,7 @@ GlobalTotalBytes += length;
 GlobalPrintableAscii += printable;
 ```
 
-This is what replaces the old `$allBytes.AddRange()` that caused the overflow. Instead of storing raw bytes, we only maintain 256 counters.
+This replaces the old `$allBytes.AddRange()` that caused memory overflow. Instead of storing raw bytes, we only maintain 256 counters.
 
 **Step 3: Zero-fill / One-fill detection**
 
@@ -424,8 +388,6 @@ asciiRatio = printable / length
 | asciiRatio > 0.7 | NOT Wiped, "Text content detected" |
 | distribution > 0.70 | Wiped, "Random data (probable wipe)" |
 
-**Rationale:** The DoD 5220.22-M standard's final pass writes cryptographically random data. True random data has entropy near 8.0 and very uniform byte distribution (chi-square near 0). Text data also has high entropy but the ASCII ratio distinguishes it.
-
 **Confidence formula for DoD:**
 ```
 confidence = (entropy/8) * 60 + distribution * 40
@@ -452,7 +414,7 @@ Only checked at lower entropy because high-entropy random data would produce fal
 
 **Step 8: Low entropy (H <= 5.0)**
 
-Returns NOT Wiped, "Structured data detected", confidence 85. Low entropy indicates repetitive patterns (e.g., file system structures, logs, databases).
+Returns NOT Wiped, "Structured data detected", confidence 85.
 
 **Step 9: Fallback**
 
@@ -512,219 +474,642 @@ public static double ComputeGlobalEntropy()
 }
 ```
 
-Computes Shannon entropy from the global frequency table accumulated across all sectors. This gives the overall entropy of the entire scanned area, not per-sector.
+Computes Shannon entropy from the global frequency table accumulated across all sectors. Maximum theoretical value: 8.0 (each of 256 byte values equally likely).
 
-Maximum theoretical value: 8.0 (each of 256 byte values equally likely).
+### Data Structures
+
+- `SectorResult` -- Status (0=Wiped, 1=NotWiped, 2=Suspicious, 3=Unreadable), Pattern string, Confidence int
+- `ChunkStats` -- Wiped/NotWiped/Suspicious/Unreadable counts for a batch
+- `LeftoverEntry` -- SectorNumber, DiskOffset, Status string, Pattern, Confidence
 
 ---
 
-## 6. Legacy PowerShell Analysis Modules
+## 7. Legacy PowerShell Analysis Modules
 
 These modules are the original interpreted implementations. They are still loaded and available for standalone debugging but are **not called during normal scan operations**. The compiled C# engine replaces all of them in the hot path.
 
 ### Get-ShannonEntropy.ps1
 
-```powershell
-function Get-ShannonEntropy {
-    param([byte[]]$Data)
-    # Builds frequency table via foreach loop
-    # Computes H = -SUM(p * log2(p))
-    # Returns entropy value (0-8 range)
-}
+Two functions in one file:
+
+**`Get-ShannonEntropy`** -- Per-sector entropy.
+```
+Parameters: $Data (byte[])
+Returns: double (0.0 to 8.0)
+```
+Uses a fixed `int[256]` array, iterates every byte, computes `p * log2(p)`.
+
+**`Get-ShannonEntropyFromHistogram`** -- Aggregated entropy from pre-computed histogram.
+```
+Parameters: $Histogram (long[256]), $TotalBytes (long)
+Returns: double (0.0 to 8.0)
 ```
 
 ### Get-ByteDistributionScore.ps1
 
-```powershell
-function Get-ByteDistributionScore {
-    param([byte[]]$Data)
-    # Computes chi-square statistic against uniform distribution
-    # Returns score 0-1 (1 = perfectly uniform)
-}
 ```
+Function: Get-ByteDistributionScore
+Parameters: $Data (byte[])
+Returns: double (0.0 to 1.0)
+```
+
+Measures byte uniformity using a Chi-square test with a fixed `int[256]` array (optimized in v3.9.0210 from hashtable). Score near 1.0 = uniformly distributed (random/wiped), near 0.0 = concentrated (structured data).
 
 ### Get-PrintableAsciiRatio.ps1
 
-```powershell
-function Get-PrintableAsciiRatio {
-    param([byte[]]$Data)
-    # Counts bytes in range 32-126, 9, 10, 13
-    # Returns ratio (0-1)
-}
 ```
+Function: Get-PrintableAsciiRatio
+Parameters: $Data (byte[])
+Returns: double (0.0 to 1.0)
+```
+
+Counts bytes in printable ranges: ASCII 32-126, Tab (0x09), newline (0x0A), carriage return (0x0D).
 
 ### Test-SectorWiped.ps1
 
-```powershell
-function Test-SectorWiped {
-    param([byte[]]$SectorData)
-    # Calls Get-ShannonEntropy, Get-ByteDistributionScore, Get-PrintableAsciiRatio
-    # Applies the same classification logic as AnalyzeSector in C#
-    # Returns @{ Status="Wiped"/"NOT Wiped"/"Suspicious"/"Unreadable"; Pattern="..."; Details="..." }
-}
 ```
+Function: Test-SectorWiped
+Parameters: $SectorData (byte[])
+Returns: hashtable { Status, Pattern, Confidence, Details }
+```
+
+Applies the same classification logic as `AnalyzeSector` in C# but in interpreted PowerShell.
 
 ### Test-FileSignatures.ps1
 
-```powershell
-function Test-FileSignatures {
-    param([byte[]]$Data)
-    # Iterates $FileSignatures hashtable
-    # Compares first N bytes of $Data against each signature
-    # Returns signature name or $null
-}
 ```
+Function: Test-FileSignatures
+Parameters: $Data (byte[])
+Returns: string (file type name) or $null
+```
+
+Iterates over `$FileSignatures` hashtable and compares first N bytes.
 
 ### Get-ByteHistogram.ps1
 
-```powershell
-function Get-ByteHistogram {
-    param([byte[]]$Data)
-    # Groups bytes into ranges and returns a histogram
-    # Used for visual display (not currently in report)
-}
-```
+Legacy standalone histogram function. Not called during the scan loop.
 
 ### Read-DiskSector.ps1
 
-```powershell
-function Read-DiskSector {
-    param([string]$DiskPath, [long]$Offset, [int]$Size)
-    # Opens FileStream, seeks to offset, reads Size bytes, closes stream
-    # Returns byte array or $null on error
-}
-```
+Opens/closes a new `FileStream` per call. Exists for ad-hoc single-sector reads and backward compatibility. **Not used in the scan loop** -- the scan loop opens its own persistent stream.
 
-**Performance problem:** Opens and closes a FileStream for every call. This was the original I/O path that caused severe performance issues. Now replaced by the persistent stream in Main.ps1.
+### Get-DataLeftoverMarkers.ps1
+
+Three functions for legacy PowerShell leftover tracking (replaced by C# engine's `RecordLeftover`):
+- `Get-DataLeftoverMarker` -- Creates a marker for one flagged sector with hex/ASCII preview
+- `New-DataLeftoverCollection` -- Creates a capped collection
+- `Add-DataLeftoverMarker` -- Adds a marker with summary tracking
 
 ### Get-SampleLocations.ps1
 
-```powershell
-function Get-SampleLocations {
-    param([long]$TotalSectors, [int]$SampleSize)
-    # Adds sectors 0-99 (disk start)
-    # Adds sectors (end-100)..(end-1) (disk end)
-    # Fills remaining with Random.Next(100, TotalSectors-100)
-    # Deduplicates with Select-Object -Unique
-    # Sorts ascending
-    # Returns [long[]] array
-}
+```
+Function: Get-SampleLocations
+Parameters: $TotalSectors (long), $SampleSize (long)
+Returns: hashtable with Count, IsFullScan, and either _array or GetEnumerator
 ```
 
-Only called when Full Disk Scan is unchecked.
+**Two modes:**
+
+**Full scan** (`SampleSize >= TotalSectors`):
+Returns a lightweight hashtable with `IsFullScan = $true` and no array. Memory: ~100 bytes.
+
+**Sampled scan** (`SampleSize < TotalSectors`):
+1. Creates a `HashSet<long>` for O(1) duplicate prevention
+2. Adds sectors 0-99 (first 100)
+3. Adds sectors `(TotalSectors - 101)` to `(TotalSectors - 2)` (last 100, boundary-safe -- avoids HPA/DCO reserved area)
+4. Fills remaining slots with random sectors using long-safe generation (combines two 31-bit randoms for full long range)
+5. Copies to a `long[]` array and sorts it
+6. Clears the `HashSet` immediately to free memory
+
+**Why sorted?** Sequential disk reads are faster than random seeks. Sorting means the `FileStream.Seek()` calls move forward through the disk.
+
+**Boundary safety:** Caps at `TotalSectors - 2` because the last 1-2 sectors on physical drives are often unreachable (HPA/DCO reserved area, firmware rounding vs OS-reported size).
 
 ---
 
-## 7. Report Generation
+## 8. Connector Functions
 
-### New-HtmlReport.ps1
+### DoEvents.ps1
 
-Generates a complete HTML document as a PowerShell string using a here-string (`@"..."@`).
+```powershell
+function DoEvents {
+    [System.Windows.Forms.Application]::DoEvents()
+}
+```
 
-**Parameters:** Technician, Results (hashtable), Disk (WMI object), DiskNumber, DiskSize, TotalSamples, WipedPercent, EntropyPercent, OverallStatus, SectorSize, Leftovers (LeftoverEntry[]), TotalLeftoverCount.
+Single-line wrapper. Called by the scan loop (time-based), by `Write-Console` (after every log line), and by `Main-Process` at each status change.
 
-**CSS classes:**
-- `.status-verified` / `.status-warning` / `.status-failed` -- Color-coded status banners (green/yellow/red)
-- `.leftover-clean` -- Green banner for "no leftovers detected"
-- `.leftover-warning` -- Yellow banner for small number of leftovers
-- `.leftover-critical` -- Red banner for significant leftovers
-- `.badge-not-wiped` / `.badge-suspicious` -- Inline status badges in the leftover table
+### Write-Console.ps1
+
+```powershell
+function Write-Console($Message, $Color)
+```
+
+Appends a timestamped, color-coded message to the `$Console` RichTextBox, scrolls to caret, and calls `DoEvents`.
+
+**Color parameter:** Accepts .NET named colors as strings: "Red", "Yellow", "SpringGreen", "Magenta", "Orange", "Gray", "White".
+
+### Get-Parameters.ps1
+
+```powershell
+function Get-Parameters
+```
+
+Collects all scan parameters from GUI controls into a single hashtable:
+- `technician`, `diskNumber`, `sampleSize` (cast to `[long]`), `sectorSize` (cast to `[int]`), `reportFormat`, `reportPath`, `reportFile` (with timestamp).
+
+---
+
+## 9. GUI Action Modules
+
+### Start-Scan.ps1
+
+1. Validates disk selected and technician name entered
+2. Extracts disk number via regex: `"Disk (\d+)"`
+3. Shows confirmation dialog
+4. Sets `$script:cancelRequested = $false`
+5. Disables Start button, enables Cancel button, disables disk list
+6. Resets UI: clears console, resets progress, hides verification panel
+7. Sets `$ResultLabel.ForeColor = Color 255 255 255` and `$ResultLabel.Text = ""`
+8. Logs parameters to console
+9. Calls `Main-Process`
+
+### Cancel-Scan.ps1
+
+Sets `$script:cancelRequested = $true`. The scan loop checks this at each chunk/sector boundary.
+
+### Full-DiskScan.ps1
+
+Toggles `$SampleSize.Enabled` based on `$FullDiskCheckBox.Checked`. When full disk is checked, the sample size input is disabled. When unchecked (Debug Mode), sample size is enabled.
+
+### Load-Disks.ps1
+
+Runs `Get-Disk`, populates `$DiskList` with entries like `"Disk 0 | Samsung SSD 870 | 465.76 GB | Status"`. Auto-selects the first disk.
+
+### Browse-Path.ps1
+
+Opens a `FolderBrowserDialog` and sets `$ReportPath.Text`.
+
+### Disk-List.ps1
+
+Updates `$SectorInfoLabel` when a disk is selected, showing the total number of sectors. If full disk scan is checked, also updates `$SampleSize.Value`.
+
+### DataGridView-DoubleClick.ps1
+
+Empty placeholder function. Reserved for future DataGridView interaction handling.
+
+---
+
+## 10. GUI Element Definitions
+
+Each file in `GUI/Elements/` creates one or more WinForms controls:
+
+| File | Variable(s) Created | Control Type | Description |
+|------|---------------------|-------------|-------------|
+| `BaseSettings.ps1` | (functions only) | -- | Defines `Location`, `Size`, `FontSize`, `Color` helpers |
+| `LeftPanel.ps1` | `$GroupBoxL` | GroupBox | Left panel container |
+| `RightPanel.ps1` | `$GroupBoxR` | GroupBox | Right panel container |
+| `ParameterHeader.ps1` | (label) | Label | "Parameters" section header |
+| `TechnicianName.ps1` | `$TechnicianName` | TextBox | Technician name input |
+| `SampleSize.ps1` | `$SampleSize` | NumericUpDown | Sample size input (disabled by default) |
+| `FullDiskCheckBox.ps1` | `$FullDiskCheckBox` | CheckBox | Full disk scan toggle (checked + disabled by default) |
+| `SectorInfoLabel.ps1` | `$SectorInfoLabel` | Label | Shows total sectors for selected disk |
+| `SectorSize.ps1` | `$SectorSize` | ComboBox | Dropdown: 512 or 4096 bytes |
+| `ReportFormat.ps1` | `$ReportFormat` | ComboBox | Dropdown: HTML, PDF, Both |
+| `ReportLocation.ps1` | `$ReportPath`, `$ReportPathButton` | TextBox + Button | Report path with browse button |
+| `ScanHeader.ps1` | (label) | Label | "Scan" section header |
+| `StatusLabel.ps1` | `$StatusLabel` | Label | Current operation status text |
+| `ScanProgress.ps1` | `$ScanProgress` | ProgressBar | Visual progress indicator |
+| `ProgressLabel.ps1` | `$ProgressLabel` | Label | Percentage text (e.g., "45%") |
+| `StartScan.ps1` | `$StartScan` | Button | Start scan button |
+| `CancelScan.ps1` | `$CancelScan` | Button | Cancel scan button (initially disabled) |
+| `VerificationPanel.ps1` | `$VerificationPanel` | Panel | Color-coded result background |
+| `ResultLabel.ps1` | `$ResultLabel` | Label | Result text |
+| `AvailableDiskHeader.ps1` | (label) | Label | "Available Disks" header |
+| `RefreshDisks.ps1` | `$RefreshDisks` | Button | Refresh disk list button |
+| `DiskList.ps1` | `$DiskList` | ListBox | Disk selection list |
+| `DiskTable.ps1` | `$DiskTable` | DataGridView | Alternative disk display |
+| `ConsoleHeader.ps1` | (label) | Label | "Console" header |
+| `Console.ps1` | `$Console` | RichTextBox | Scrollable, colored log output |
+| `Separator.ps1` | (label) | Label | Visual separator line |
+
+---
+
+## 11. GUI Element Factories
+
+Each file in `GUI/NewElements/` provides a factory function:
+
+| File | Function | Returns |
+|------|----------|---------|
+| `New-Button.ps1` | `New-Button` | `System.Windows.Forms.Button` |
+| `New-CheckBox.ps1` | `New-CheckBox` | `System.Windows.Forms.CheckBox` |
+| `New-ComboBox.ps1` | `New-ComboBox` | `System.Windows.Forms.ComboBox` |
+| `New-DataGridView.ps1` | `New-DataGridView` | `System.Windows.Forms.DataGridView` |
+| `New-GroupBox.ps1` | `New-GroupBox` | `System.Windows.Forms.GroupBox` |
+| `New-Label.ps1` | `New-Label` | `System.Windows.Forms.Label` |
+| `New-ListBox.ps1` | `New-ListBox` | `System.Windows.Forms.ListBox` |
+| `New-NumericUpDown.ps1` | `New-NumericUpDown` | `System.Windows.Forms.NumericUpDown` |
+| `New-Panel.ps1` | `New-Panel` | `System.Windows.Forms.Panel` |
+| `New-ProgressBar.ps1` | `New-ProgressBar` | `System.Windows.Forms.ProgressBar` |
+| `New-RichTextBox.ps1` | `New-RichTextBox` | `System.Windows.Forms.RichTextBox` |
+| `New-StatusBar.ps1` | `New-StatusBar` | `System.Windows.Forms.StatusBar` |
+| `New-StatusBarLabel.ps1` | `New-StatusBarLabel` | `ToolStripStatusLabel` |
+| `New-StatusBarProgressBar.ps1` | `New-StatusBarProgressBar` | `ToolStripProgressBar` |
+| `New-TextBox.ps1` | `New-TextBox` | `System.Windows.Forms.TextBox` |
+
+These factories apply consistent dark-theme styling (dark backgrounds, light text, Segoe UI font) and return configured controls ready for use.
+
+---
+
+## 12. Data Structures In-Depth
+
+### 12.1 Sample Locations Object
+
+**Sampled scan:**
+```powershell
+@{
+    Count      = [long]15000
+    IsFullScan = $false
+    _array     = [long[]]@(0, 1, 2, ..., 99, 4500, 8900, ..., N-2)
+                                       # Sorted, capped at TotalSectors - 2
+}
+```
+
+**Full scan:**
+```powershell
+@{
+    Count         = [long]976773168
+    IsFullScan    = $true
+    GetEnumerator = [scriptblock]      # Sequential counter (unused -- direct while loop used instead)
+    _totalForEnum = [long]976773168
+}
+```
+
+### 12.2 Results Hashtable
+
+```powershell
+$results = @{
+    Wiped      = [int]0
+    NotWiped   = [int]0
+    Suspicious = [int]0
+    Unreadable = [int]0
+    Patterns   = @{
+        "Zero-filled (0x00)"              = 5000
+        "Random data (DoD 5220.22-M)"     = 4800
+        "One-filled (0xFF)"               = 150
+        "File signature: PDF"             = 3
+        "Text content detected"           = 12
+    }
+}
+```
+
+### 12.3 Pattern Counts Dictionary
+
+```csharp
+// Created in PowerShell, passed to C# engine
+Dictionary<string, int> patternCounts
+// Converted to $results.Patterns hashtable after scan
+```
+
+### 12.4 File Signatures Table
+
+```powershell
+$FileSignatures = @{
+    "PDF"      = @(0x25, 0x50, 0x44, 0x46, 0x2D)       # %PDF-
+    "ZIP/DOCX" = @(0x50, 0x4B, 0x03, 0x04)             # PK..
+    "JPEG"     = @(0xFF, 0xD8, 0xFF, 0xE0)             # JPEG/JFIF
+    "PNG"      = @(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A) # .PNG\r\n
+    "GIF87"    = @(0x47, 0x49, 0x46, 0x38, 0x37, 0x61) # GIF87a
+    "GIF89"    = @(0x47, 0x49, 0x46, 0x38, 0x39, 0x61) # GIF89a
+    "RAR"      = @(0x52, 0x61, 0x72, 0x21, 0x1A, 0x07) # Rar!..
+    "7Z"       = @(0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C) # 7z....
+    "SQLite"   = @(0x53, 0x51, 0x4C, 0x69, 0x74, 0x65) # SQLite
+    "NTFS"     = @(0xEB, 0x52, 0x90, 0x4E, 0x54, 0x46, 0x53) # NTFS boot
+    "EXE"      = @(0x4D, 0x5A, 0x90, 0x00)             # MZ + valid header
+}
+```
+
+All signatures are 4+ bytes. The original 2-byte `"MZ"` signature was removed because random data has a ~1/65536 chance of matching per sector.
+
+---
+
+## 13. Performance Architecture
+
+### 13.1 Why C# via Add-Type?
+
+PowerShell's `foreach` loops are interpreted. A 500 GB disk at 512 bytes/sector = ~1 billion sectors. Each sector previously went through 4-5 separate PowerShell `foreach` byte loops (entropy, distribution, ASCII ratio, frequency counting). This resulted in multi-day scan times.
+
+The compiled C# engine performs all analysis in a single loop per sector, with ~100-500x throughput improvement over interpreted PowerShell.
+
+### 13.2 I/O Strategy
+
+- **Full disk scan:** Sequential reads in 1 MB chunks (2048 sectors per read). No `Seek` needed -- sequential reads advance the stream position automatically. The OS read-ahead cache works optimally.
+- **Sample scan:** Individual sector reads via `Seek` + `Read` on a persistent `FileStream`. The stream is opened once and reused.
+- **Buffer reuse:** Pre-allocated byte arrays reused across reads to reduce GC pressure. `$chunkBuffer` = 1 MB for full disk; `$readBuffer` = sector size for sample mode.
+
+### 13.3 Shared FileStream
+
+The disk is opened **once** before the scan loop and closed **once** after. This eliminates one `Open` + `Close` + `Dispose` per sector (was ~100,000+ syscalls for a typical sample scan).
+
+### 13.4 Early-Exit Pattern Checks
+
+The C# engine checks zero-fill and one-fill **before** calculating entropy, distribution, and ASCII ratio. For a zero-filled sector, this confirms the status using only the frequency table (all 512 counts in bucket 0x00). Without early exit, entropy/distribution/ASCII would add unnecessary computation.
+
+### 13.5 Entropy Gate for Signatures
+
+File signature checking only occurs when `entropy < 7.0`. This avoids false positives from random data and saves the overhead of iterating 11 signatures when the sector is clearly random.
+
+### 13.6 Memory Management
+
+| Component | Memory |
+|-----------|--------|
+| Global frequency table | 2 KB (256 x 8 bytes) |
+| Chunk buffer (full scan) | 1 MB |
+| Sector buffer (sample) | 512 bytes or 4 KB |
+| Leftover entries (capped) | ~50 KB max |
+| Pattern counts dictionary | ~1 KB |
+| **Total** | **~1-2 MB** |
+
+---
+
+## 14. Threading Model and GUI Responsiveness
+
+### The Problem
+
+PowerShell WinForms runs on a single thread. When `Main-Process` enters its scan loop, the GUI message pump is blocked. The user cannot click cancel, move the window, or see progress updates.
+
+### The Solution: DoEvents + Time-Based Refresh
+
+The scan loop uses a `Stopwatch`-based timer:
+
+```powershell
+$uiTimer = [System.Diagnostics.Stopwatch]::StartNew()
+$uiIntervalMs = 250
+
+if ($percent -ne $lastPercent) {
+    # Percent changed: full UI update
+    $StatusLabel.Text = "..."
+    $ScanProgress.Value = ...
+    $ProgressLabel.Text = "..."
+    DoEvents
+    $lastPercent = $percent
+    $uiTimer.Restart()
+} elseif ($uiTimer.ElapsedMilliseconds -ge $uiIntervalMs) {
+    # 250ms elapsed: minimal UI update (status text + DoEvents)
+    $StatusLabel.Text = "..."
+    DoEvents
+    $uiTimer.Restart()
+}
+```
+
+This ensures `DoEvents` is called at least every 250ms regardless of scan speed.
+
+**Why 250ms?** This provides ~4 updates per second, perceived as smooth. Lower values add measurable overhead; higher values feel sluggish when clicking cancel.
+
+### DoEvents Overhead
+
+When no pending messages exist, `DoEvents` returns almost instantly (~0.01ms). If many messages queue up (rapid console logging), it can take longer -- this is why `Write-Console` calls `DoEvents` internally to prevent queue buildup.
+
+### Cancellation Latency
+
+Maximum delay between clicking "Cancel" and the scan checking `$script:cancelRequested` is 250ms. This feels instantaneous.
+
+---
+
+## 15. Error Handling Strategy
+
+### Main-Process try/catch/finally
+
+```powershell
+function Main-Process {
+    try {
+        # ... entire scan logic ...
+    }
+    catch {
+        Write-Console "ERROR: $_" "Red"
+        $StatusLabel.Text = "Status: ERROR"
+        $VerificationPanel.Visible = $true
+        $VerificationPanel.BackColor = Color 255 0 0
+        $ResultLabel.Text = "ERROR"
+        [System.Windows.Forms.MessageBox]::Show("An error occurred: $_", ...)
+    }
+    finally {
+        # ALWAYS executed: cleanup
+        if ($diskStream) {
+            try { $diskStream.Close(); $diskStream.Dispose() } catch {}
+            $diskStream = $null
+        }
+        $StartScan.Enabled = $true
+        $CancelScan.Enabled = $false
+        $DiskList.Enabled = $true
+    }
+}
+```
+
+The `finally` block ensures the disk stream is always closed and UI controls are always re-enabled.
+
+### Per-Sector Error Handling
+
+Both scan paths wrap disk I/O in individual try/catch:
+
+**Sample path:**
+```powershell
+try {
+    [void]$diskStream.Seek($offset, ...)
+    $bytesRead = $diskStream.Read(...)
+    if ($bytesRead -gt 0) { ... }
+}
+catch {
+    $sectorData = $null  # Classified as "Unreadable"
+}
+```
+
+**Full disk path:**
+```powershell
+try {
+    $bytesRead = $diskStream.Read($chunkBuffer, 0, $bytesToRead)
+    if ($bytesRead -le 0) { ... handle as unreadable ... }
+    # Partial read handling for last chunk
+}
+catch {
+    # Mark remaining sectors in chunk as unreadable
+}
+```
+
+A failed read results in "Unreadable" classification. The scan continues.
+
+### Module Loading Error
+
+If any module fails to load, the scan aborts with a fatal error message.
+
+---
+
+## 16. Report Generation Pipeline
+
+```
+1. Scan completes
+        |
+        v
+2. New-HtmlReport generates complete HTML string
+   (self-contained: embedded CSS, no external dependencies)
+        |
+        v
+3. Branch on $ReportFormat:
+   |
+   +-- "HTML" -> Save HTML to $reportFile.html
+   |
+   +-- "PDF"  -> Save HTML to temp file -> Convert-HtmlToPdf -> Delete temp
+   |
+   +-- "Both" -> Save HTML to $reportFile.html -> Convert-HtmlToPdf (uses same HTML)
+        |
+        v
+4. Show completion MessageBox with option to open report
+```
+
+**PDF fallback chain:**
+```
+Edge (Chromium) -> Chrome -> Brave -> wkhtmltopdf -> Word COM -> HTML fallback
+```
+
+### Report CSS Classes
+
+- `.status-verified` / `.status-warning` / `.status-failed` -- Color-coded status banners
+- `.leftover-clean` / `.leftover-warning` / `.leftover-critical` -- Conditional leftover banners
+- `.badge-not-wiped` / `.badge-suspicious` -- Inline status badges in leftover table
 - `.hex-addr` -- Monospace font for sector numbers and hex addresses
 - `.grid` / `.card` -- Three-column metric cards
 - `.no-break` -- Prevents page breaks inside sections (print)
 - `.page-break` -- Forces a page break before the certification page
 
-**Report sections in order:**
+### Status Matching
 
-1. **Report ID** -- Unique ID: `WV-{timestamp}-{guid-fragment}`
-2. **Status banner** -- Color-coded overall verdict
-3. **Disk Information table** -- Number, model, serial, capacity, partition style, bus type, media type
-4. **Analysis Summary cards** -- Wiped%, sectors analyzed, entropy%
-5. **Detailed Sector Analysis table** -- Wiped/Suspicious/NotWiped/Unreadable with counts and percentages
-6. **Detected Wipe Patterns table** -- Each pattern type with occurrence count, sorted descending
-7. **Data Leftover Analysis** -- Conditional section:
-   - If `$TotalLeftoverCount == 0`: Green "No Data Leftovers Detected" message
-   - If `$TotalLeftoverCount <= 50`: Yellow warning with full table
-   - If `$TotalLeftoverCount > 50`: Red critical warning with table (capped at 500 rows) and note about remaining entries
-   - Table columns: #, Sector Number, Disk Offset (hex), Status (badge), Detected Pattern, Confidence%
-8. **Verification Methodology table** -- Date, time, computer, technician, sampling method, sector size, detection method, standards
-9. **Certification** -- Data sanitization statement, technician signature lines, supervisor signature lines
-10. **Footer** -- Tool version and generation timestamp
-
-### Convert-HtmlToPdf.ps1
-
-Attempts PDF conversion via four fallback methods:
-
-1. **Microsoft Edge** -- `msedge.exe --headless --print-to-pdf`
-2. **Google Chrome** -- `chrome.exe --headless --print-to-pdf`
-3. **Brave** -- `brave.exe --headless --print-to-pdf`
-4. **wkhtmltopdf** -- `wkhtmltopdf.exe` with A4 page settings
-5. **Microsoft Word COM** -- `Word.Application` COM object with `SaveAs(wdFormatPDF)`
-
-Each method checks for the executable, attempts conversion, verifies the output file exists, and moves to the next method on failure. Returns `$true`/`$false`.
+Uses `-like` operator for wildcard matching:
+```powershell
+$statusClass = if ($OverallStatus -like "VERIFIED*") { "verified" }
+               elseif ($OverallStatus -like "MOSTLY*") { "warning" }
+               else { "failed" }
+```
 
 ---
 
-## 8. Data Flow Diagram
+## 17. Known Limitations and Edge Cases
 
-```
-Start-Scan (GUI event)
-    |
-    v
-Main-Process
-    |
-    +-- Get-Parameters -> $P (reads GUI fields)
-    |
-    +-- Load Modules (dot-source all .ps1 files)
-    |       |
-    |       +-- DiskAnalysisEngine.ps1 (Add-Type compiles C#)
-    |
-    +-- SetSignatures (pass file signatures to C# engine)
-    |
-    +-- Get-Disk $DiskNumber -> $disk, $diskPath, $totalSectors
-    |
-    +-- [if sample mode] Get-SampleLocations -> $sampleLocations
-    |
-    +-- ResetGlobalCounters (clear C# accumulators)
-    |
-    +-- Open FileStream($diskPath)
-    |
-    +-- SCAN LOOP:
-    |   |
-    |   +-- [full disk] Read 1MB chunk -> AnalyzeChunk()
-    |   |       |
-    |   |       +-- For each sector in chunk:
-    |   |           +-- AnalyzeSector() -> SectorResult
-    |   |           +-- Accumulate GlobalFrequency, GlobalTotalBytes, GlobalPrintableAscii
-    |   |           +-- RecordLeftover() if NOT Wiped or Suspicious
-    |   |           +-- Update patternCounts dictionary
-    |   |       +-- Return ChunkStats
-    |   |
-    |   +-- [sample] Seek + Read 1 sector -> AnalyzeSector()
-    |   |       |
-    |   |       +-- Same per-sector logic as above
-    |   |       +-- RecordLeftover() called from PowerShell
-    |   |
-    |   +-- Every 250ms: Update progress bar, status, speed, ETA, DoEvents
-    |
-    +-- Close FileStream
-    |
-    +-- ComputeGlobalEntropy() -> $overallEntropy -> $entropyPercent
-    |
-    +-- GetLeftovers() -> $leftovers
-    +-- GetTotalLeftoverCount() -> $totalLeftoverCount
-    |
-    +-- Calculate $wipedPercent, $overallStatus
-    |
-    +-- New-HtmlReport(all data) -> $htmlContent
-    |
-    +-- Save HTML / Convert to PDF
-    |
-    +-- Show result dialog
-    |
-    v
-Finally: Close stream, re-enable UI
-```
+### 17.1 Full Scan GetEnumerator
+
+The `GetEnumerator` scriptblock returned for full scans is defined but never called. The scan loop uses a direct `while` counter -- faster than invoking a scriptblock.
+
+### 17.2 Sector Size Mismatch
+
+If the user selects a sector size that doesn't match the disk's physical sector size, the tool will still read that many bytes per seek. This may cause reading across sector boundaries (harmless but technically imprecise).
+
+### 17.3 Cancel During Report Generation
+
+If the user cancels during report generation (after the scan loop), cancellation has no effect -- the report generation runs to completion. Cancellation only works during the scan loop.
+
+### 17.4 PDF Browser Popup
+
+`Start-Process` for Edge/Chrome headless PDF may briefly show a console window or taskbar entry depending on the system configuration.
+
+### 17.5 Disk Stream Sharing
+
+The shared `FileStream` uses `FileShare.ReadWrite`. If another process writes to the disk during the scan, the read data may include both old and new content. The disk should be unmounted or idle.
+
+### 17.6 Last-Sector Boundary
+
+Physical drives often have 1-2 unreachable sectors at the very end (HPA/DCO reserved area). Sample locations are capped at `TotalSectors - 2`. The full disk scan wraps I/O in try/catch and handles partial reads on the last chunk.
+
+---
+
+## 18. Changelog (Code-Level)
+
+### v4.0 (2026-02-13)
+
+**Files changed:** `Main.ps1`, `Modules/DiskAnalysisEngine.ps1` (new), `GUI/GUI.ps1`, `GUI/Elements/FullDiskCheckBox.ps1`, `GUI/Elements/SampleSize.ps1`, `Modules/Get-SampleLocations.ps1`, `Modules/New-HtmlReport.ps1`
+
+1. **DiskAnalysisEngine.ps1 -- Compiled C# engine**
+   - All byte-level analysis (entropy, distribution, ASCII ratio, signatures, classification) compiled to .NET via `Add-Type`
+   - `AnalyzeSector` processes one sector with full classification in compiled code
+   - `AnalyzeChunk` processes 1 MB buffers (2048 sectors) for full-disk mode
+   - `RecordLeftover` tracks NOT Wiped/Suspicious entries with a cap of 500
+   - `ComputeGlobalEntropy` calculates overall entropy from accumulated frequency table
+   - 100-500x throughput improvement over interpreted PowerShell
+
+2. **Main.ps1 -- Dual scan paths with compiled engine**
+   - Full disk: sequential 1 MB chunk reads -> `AnalyzeChunk()`
+   - Sample: seek + read single sector -> `AnalyzeSector()`
+   - Both paths use try/catch around disk I/O with graceful "Unreadable" fallback
+   - Partial-read handling for last chunk in full disk mode
+   - Status matching fixed from `-eq "VERIFIED*"` to `-like "VERIFIED*"`
+   - Speed and ETA display during scan
+
+3. **GUI.ps1 -- Menu bar with Debug Mode**
+   - "Options" menu with "Debug Mode" toggle
+   - When enabled: unlocks FullDiskCheckBox and SampleSize for test runs
+   - When disabled: forces full disk scan and locks controls
+
+4. **FullDiskCheckBox.ps1 + SampleSize.ps1 -- Default full scan**
+   - FullDiskCheckBox checked and disabled by default
+   - SampleSize disabled with darkened background by default
+
+5. **Get-SampleLocations.ps1 -- Long-safe and boundary-safe**
+   - Uses `HashSet<long>` for O(1) dedup
+   - Long-safe random generation (combines two 31-bit randoms)
+   - Last sectors capped at `TotalSectors - 2` to avoid HPA/DCO reserved area
+   - Converts to sorted `[long[]]` array
+
+6. **New-HtmlReport.ps1 -- Updated status matching and leftover display**
+   - Status matching uses `-like` operator
+   - Leftover section with conditional banners (green/yellow/red based on count)
+   - Accepts `Leftovers` (LeftoverEntry[]) and `TotalLeftoverCount` parameters
+
+### v3.9.0210.01 (2026-02-10)
+
+**Files changed:** `Main.ps1`, `GUI/ActionModules/Start-Scan.ps1`, `Modules/Get-ByteDistributionScore.ps1`
+
+1. **Main.ps1 -- Time-based UI refresh**
+   - Added `Stopwatch`-based timer with 200ms interval (later updated to 250ms in v4.0)
+   - Both scan loops call `DoEvents` when timer elapses, in addition to percent-change trigger
+
+2. **Start-Scan.ps1 -- ResultLabel bug fix**
+   - Changed `$ResultLabel.Text = Color 255 255 255` to `$ResultLabel.ForeColor = Color 255 255 255` and `$ResultLabel.Text = ""`
+
+3. **Get-ByteDistributionScore.ps1 -- Array optimization**
+   - Replaced hashtable-based frequency counting with fixed `int[256]` array
+
+### v3.9.0209.01 (2026-02-09)
+
+**Files changed:** `Main.ps1`, `Modules/Get-DataLeftoverMarkers.ps1` (new), `Modules/New-HtmlReport.ps1`, `Modules/Get-SampleLocations.ps1`
+
+- Added `Get-DataLeftoverMarkers.ps1` module with three functions
+- Integrated marker collection into scan loops in `Main.ps1`
+- Added data leftover section to HTML report
+- Fixed critical memory crash for full-disk scans (streaming iterator pattern)
+- Shared `FileStream` for the entire scan instead of per-sector opens
+- `Get-SampleLocations` returns lightweight object for full scans (no array)
+
+### v3.9.0203.01 (2026-02-03)
+
+**Files changed:** `Main.ps1`, `Modules/Get-SampleLocations.ps1`, `Modules/Get-ShannonEntropy.ps1`
+
+- Replaced `ArrayList` byte storage with running `long[256]` histogram
+- Added `Get-ShannonEntropyFromHistogram` function
+- Replaced array concatenation with `HashSet<long>` in `Get-SampleLocations`
+- Memory usage reduced from ~200MB to ~2MB for 100K-sector scans
+
+### v3.8.0116.03 (2026-01-12)
+
+- Split monolithic script into modular architecture (Modules/, Connectors/, GUI/)
+- Introduced element factory pattern (GUI/NewElements/)
+- Separated action handlers into GUI/ActionModules/
+
+### v3.8.0116.02 (2026-01-11)
+
+- Improved analysis algorithms and thresholds
+- Enhanced HTML report layout and styling
+
+### v3.8.0116.01 (2026-01-08)
+
+- Initial release as a single-file PowerShell script
 
 ---
 
@@ -752,3 +1137,10 @@ Finally: Close stream, re-enable UI
 | Compressed/encrypted | 60% | Fixed (heuristic) |
 | Structured data | 85% | Fixed (low entropy = organized) |
 | Unknown pattern | 50% | Fixed (fallback) |
+
+---
+
+## License
+
+Copyright (c) 2026 Yannick Morgenthaler / JSW
+Contact: yannick.morgenthaler@jsw.swiss
