@@ -190,12 +190,22 @@ function Main-Process {
         Write-Console "Analyzing $($totalSamples.ToString('N0')) sectors..." "Yellow"
 
         # Open the disk stream once for the entire scan
+        # Note: [System.IO.File]::Open() cannot open raw Win32 devices like \\.\PhysicalDrive
+        # We must use the FileStream constructor directly for raw disk access
         $diskStream = $null
         try {
-            $diskStream = [System.IO.File]::Open($diskPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $diskStream = New-Object System.IO.FileStream(
+                $diskPath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite,
+                4096,  # buffer size
+                [System.IO.FileOptions]::None
+            )
         }
         catch {
             Write-Console "ERROR: Could not open disk stream: $_" "Red"
+            Write-Console "Make sure you are running as Administrator." "Yellow"
             throw
         }
 
