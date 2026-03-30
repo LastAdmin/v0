@@ -5,6 +5,55 @@ Add-Type -TypeDefinition @"
 using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+// Helper class for raw physical disk access via Win32 CreateFile
+// .NET FileStream blocks device paths (\\.\), so we must P/Invoke directly
+public static class RawDiskAccess
+{
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    private static extern SafeFileHandle CreateFile(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    private const uint GENERIC_READ = 0x80000000;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint OPEN_EXISTING = 3;
+    private const uint FILE_FLAG_NO_BUFFERING = 0x20000000;
+    private const uint FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000;
+
+    /// <summary>
+    /// Opens a raw physical disk for reading (e.g., \\.\PhysicalDrive0)
+    /// Returns a FileStream that can be used for sector-level reads.
+    /// </summary>
+    public static FileStream OpenDisk(string diskPath)
+    {
+        SafeFileHandle handle = CreateFile(
+            diskPath,
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            IntPtr.Zero,
+            OPEN_EXISTING,
+            FILE_FLAG_SEQUENTIAL_SCAN,
+            IntPtr.Zero);
+
+        if (handle.IsInvalid)
+        {
+            int error = Marshal.GetLastWin32Error();
+            throw new IOException("Failed to open disk: " + diskPath + " (Win32 Error: " + error + ")");
+        }
+
+        // Wrap the handle in a FileStream for easy reading
+        return new FileStream(handle, FileAccess.Read, 4096, false);
+    }
+}
 
 public struct SectorResult
 {

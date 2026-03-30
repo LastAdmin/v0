@@ -138,7 +138,6 @@ function Main-Process {
         }
 
         $diskPath = "\\.\PhysicalDrive$DiskNumber"
-        $diskPathforEXE = "\PhysicalDrive$DiskNumber"
         $diskSize = $disk.Size
         $totalSectors = [math]::Floor($diskSize / $SectorSize)
 
@@ -190,18 +189,11 @@ function Main-Process {
         Write-Console "Analyzing $($totalSamples.ToString('N0')) sectors..." "Yellow"
 
         # Open the disk stream once for the entire scan
-        # Note: [System.IO.File]::Open() cannot open raw Win32 devices like \\.\PhysicalDrive
-        # We must use the FileStream constructor directly for raw disk access
+        # Note: .NET FileStream blocks device paths (\\.\PhysicalDrive), so we use
+        # the RawDiskAccess helper which calls Win32 CreateFile directly via P/Invoke
         $diskStream = $null
         try {
-            $diskStream = New-Object System.IO.FileStream(
-                $diskPath,
-                [System.IO.FileMode]::Open,
-                [System.IO.FileAccess]::Read,
-                [System.IO.FileShare]::ReadWrite,
-                4096,  # buffer size
-                [System.IO.FileOptions]::None
-            )
+            $diskStream = [RawDiskAccess]::OpenDisk($diskPath)
         }
         catch {
             Write-Console "ERROR: Could not open disk stream: $_" "Red"
