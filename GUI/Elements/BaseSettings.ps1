@@ -29,3 +29,9 @@ function Color($R, $G, $B) {
     $Color = [System.Drawing.Color]::FromArgb($R, $G, $B)
     return $Color
 }
+
+function Draw-Icon($IconPath) {
+    $GetIcon = Get-Item $IconPath
+    $Icon = [System.Drawing.Image]::FromFile($GetIcon)
+    return $Icon
+}

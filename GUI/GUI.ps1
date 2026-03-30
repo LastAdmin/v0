@@ -5,7 +5,7 @@
     Loading GUI and all Elements inside the GUI.
     Loading sidescripts for element actions.
 .NOTES
-    Version:        3.8.0116.01
+    Version:        4.26.0121.1037
     Creation Date:  12.01.2026
     Author:         Yannick Morgenthaler
     Company:        JSW
@@ -23,18 +23,16 @@
     12.01.2026      Yannick Morgenthaler    Script was created initially.
     15.01.2026      Yannick Morgenthaler    Added Panels and Elements
     16.01.2026      Yannick Morgenthaler    Added Synopsis
+    21.01.2026      Yannick Morgenthaler    Internal Structure Update
 #>
 
 function Load-GUI {
-    ##########################################
-    # Load Index
-    ##########################################
-
     ##########################################
     # Load Action Modules
     ##########################################
     . .\GUI\ActionModules\Browse-Path.ps1
     . .\GUI\ActionModules\DataGridView-DoubleClick.ps1
+    . .\GUI\ActionModules\MenuStrip-Items.ps1
     . .\GUI\ActionModules\Full-DiskScan.ps1
     . .\GUI\ActionModules\Disk-List.ps1
     . .\GUI\ActionModules\Load-Disks.ps1
@@ -45,6 +43,7 @@ function Load-GUI {
     # Load Element Settings
     ##########################################
     . .\GUI\Elements\BaseSettings.ps1
+    $IconsPath = ".\GUI\Icons\"
 
     ##########################################
     # Load New Element Functions
@@ -58,12 +57,14 @@ function Load-GUI {
     . .\GUI\NewElements\New-ListBox.ps1
     . .\GUI\NewElements\New-NumericUpDown.ps1
     . .\GUI\NewElements\New-Panel.ps1
+    . .\GUI\NewElements\New-PictureBox.ps1
     . .\GUI\NewElements\New-ProgressBar.ps1
     . .\GUI\NewElements\New-RichTextBox.ps1
     . .\GUI\NewElements\New-StatusBar.ps1
     . .\GUI\NewElements\New-StatusBarLabel.ps1
     . .\GUI\NewElements\New-StatusBarProgressBar.ps1
     . .\GUI\NewElements\New-TextBox.ps1
+    . .\GUI\NewElements\New-MenuStrip.ps1
 
     ##########################################
     # Create GUI
@@ -73,58 +74,14 @@ function Load-GUI {
     Add-Type -AssemblyName System.drawing
 
     $MainWindow = New-Object System.Windows.Forms.Form
-    $MainWindow.Text = "Disk Report"
-    #$Form1.Icon = '.\itemContent.ico' -> icon has to be set
+    $MainWindow.Text = "Disk Wipe Verification Tool"
+    $pwdCheck = pwd
+    $MainWindow.Icon = "$pwdCheck" + "$IconsPath" + "\dwvt_logo.ico" #-> icon has to be set
     #$MainWindow.BackgroundImage = $formbg
     #$MainWindow.BackgroundImageLayout = "Stretch"
     $MainWindow.BackColor = Color 25 25 25
     $MainWindow.FormBorderStyle = 'Fixed3D'
     $MainWindow.MaximizeBox = $false
-
-    ##########################################
-    # Menu Bar
-    ##########################################
-    $MenuStrip = New-Object System.Windows.Forms.MenuStrip
-    $MenuStrip.BackColor = Color 50 50 50
-    $MenuStrip.ForeColor = Color 255 255 255
-
-    # Options Menu
-    $OptionsMenu = New-Object System.Windows.Forms.ToolStripMenuItem
-    $OptionsMenu.Text = "Options"
-    $OptionsMenu.ForeColor = Color 255 255 255
-
-    # Debug Mode Toggle
-    $DebugModeItem = New-Object System.Windows.Forms.ToolStripMenuItem
-    $DebugModeItem.Text = "Debug Mode"
-    $DebugModeItem.CheckOnClick = $true
-    $DebugModeItem.Checked = $false
-    $DebugModeItem.ToolTipText = "Enable sample size and full disk checkbox for debug runs"
-    $DebugModeItem.ForeColor = Color 255 255 255
-
-    $DebugModeItem.Add_CheckedChanged({
-        if ($DebugModeItem.Checked) {
-            # Enable debug controls
-            $FullDiskCheckBox.Enabled = $true
-            $SampleSize.Enabled = -not $FullDiskCheckBox.Checked
-            if ($SampleSize.Enabled) {
-                $SampleSize.BackColor = Color 100 100 100
-            }
-            $MainWindow.Text = "Disk Report [DEBUG MODE]"
-        } else {
-            # Disable debug controls, force full disk scan
-            $FullDiskCheckBox.Checked = $true
-            $FullDiskCheckBox.Enabled = $false
-            $SampleSize.Enabled = $false
-            $SampleSize.BackColor = Color 15 15 15
-            $MainWindow.Text = "Disk Report"
-        }
-        DoEvents
-    })
-
-    $OptionsMenu.DropDownItems.Add($DebugModeItem) | Out-Null
-    $MenuStrip.Items.Add($OptionsMenu) | Out-Null
-    $MainWindow.MainMenuStrip = $MenuStrip
-    $MainWindow.Controls.Add($MenuStrip)
 
     ##########################################
     # Elements
@@ -133,8 +90,14 @@ function Load-GUI {
     $components = New-Object System.ComponentModel.Container
 
     #=========================
+    # Info-Window
+    #=========================
+    . .\GUI\Info-Window\Info-Window.ps1
+
+    #=========================
     # Main GUI
     #=========================
+    . .\GUI\Elements\MenuStrip.ps1
 
     #=========================
     # Left Panel
@@ -174,6 +137,18 @@ function Load-GUI {
     #=========================
     # Elements Event Handlers
     #=========================
+    $HelpMenu.add_Click({
+        Info-Window
+    })
+
+    $HardwareReportItem.add_Click({
+        Create-HardwareReport
+    })
+
+    $DebugModeItem.Add_CheckedChanged({
+        Debug-Mode
+    })
+
     $FullDiskCheckBox.Add_CheckedChanged({
         Full-DiskScan
     })
@@ -201,7 +176,7 @@ function Load-GUI {
     ##########################################
     # Set Window Settings
     ##########################################
-    $MainWindow.ClientSize = New-Object System.Drawing.Size(1000, 700)
+    $MainWindow.ClientSize = New-Object System.Drawing.Size(1000, 710)
     $MainWindow.Controls.AddRange(@(
         $GroupBoxL,
         $GroupBoxR

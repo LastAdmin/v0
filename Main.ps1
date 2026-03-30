@@ -138,6 +138,7 @@ function Main-Process {
         }
 
         $diskPath = "\\.\PhysicalDrive$DiskNumber"
+        $diskPathforEXE = "\PhysicalDrive$DiskNumber"
         $diskSize = $disk.Size
         $totalSectors = [math]::Floor($diskSize / $SectorSize)
 
@@ -438,6 +439,13 @@ function Main-Process {
 
         Write-Console "Leftover sectors with potential data: $($totalLeftoverCount.ToString('N0'))" $(if($totalLeftoverCount -gt 0){"Yellow"}else{"SpringGreen"})
 
+        #Retrieve HardwareInfo for SerialNumber
+        Write-Console "_____________________________________________________" "Gray"
+        Write-Console "Retrieve Hardware Info..." "Yellow"
+        $StatusLabel.Text = "Status: Retrieve Hardware Info..."
+        DoEvents
+        $HardwareInfo = Get-HardwareInfo
+
         # Generate Reports
         Write-Console "_____________________________________________________" "Gray"
         Write-Console "Generating Report(s)..." "Yellow"
@@ -447,10 +455,14 @@ function Main-Process {
         $htmlContent = New-HtmlReport -Technician $Technician -Results $results -Disk $disk -DiskNumber $DiskNumber `
     -DiskSize $diskSize -TotalSamples $totalSamples -WipedPercent $wipedPercent `
     -EntropyPercent $entropyPercent -OverallStatus $overallStatus -SectorSize $SectorSize `
-    -Leftovers $leftovers -TotalLeftoverCount $totalLeftoverCount
+    -Leftovers $leftovers -TotalLeftoverCount $totalLeftoverCount -ComputerSerial $HardwareInfo.BiosSN
 
         $htmlPath = "$ReportFile.html"
         $pdfPath = "$ReportFile.pdf"
+
+        if (-not (Test-Path $ReportPath)) {
+            mkdir $ReportPath | Out-Null
+        }
 
         if ($ReportFormat -eq "HTML" -or $ReportFormat -eq "Both") {
             $htmlContent | Out-File -FilePath $htmlPath -Encoding UTF8

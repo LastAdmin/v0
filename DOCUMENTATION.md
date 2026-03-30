@@ -24,6 +24,8 @@ Deep technical documentation for developers who want to understand, modify, or e
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## Overview
 
 The Disk Wipe Verification Tool is a PowerShell-based application that verifies whether a disk has been properly wiped/sanitized. It performs statistical sampling or full-disk scanning of disk sectors, analyzes byte patterns using a compiled C# engine, and determines if the disk meets data sanitization standards such as **DoD 5220.22-M** and **NIST 800-88**.
@@ -42,6 +44,8 @@ The Disk Wipe Verification Tool is a PowerShell-based application that verifies 
 - **Memory-optimized** - Constant ~2MB memory regardless of disk size
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## Architecture
 
@@ -79,6 +83,8 @@ The Disk Wipe Verification Tool is a PowerShell-based application that verifies 
 +---------------------+                       +---------------------+
 ```
 
+<div style="page-break-after: always;"></div>
+
 ### Design Principles
 
 1. **Dot-source loading:** All files are loaded via `. .\path\to\file.ps1`. Functions and variables from any file are globally available after loading.
@@ -86,6 +92,8 @@ The Disk Wipe Verification Tool is a PowerShell-based application that verifies 
 3. **Compiled hot path:** All byte-level analysis runs in compiled C# via `Add-Type`. PowerShell only handles I/O, orchestration, and UI updates.
 4. **Throttled GUI updates:** The scan loop uses a `Stopwatch` to call `DoEvents` at most every 250ms, preventing the GUI from freezing or consuming CPU on UI repaints.
 5. **Default full scan:** The tool defaults to full disk scan with locked controls. Debug Mode (via Options menu) unlocks sample size for test runs.
+
+<div style="page-break-after: always;"></div>
 
 ### Component Responsibilities
 
@@ -104,6 +112,8 @@ The Disk Wipe Verification Tool is a PowerShell-based application that verifies 
 | **Factories** | `GUI/NewElements/*.ps1` | UI element factory functions |
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## File Structure
 
@@ -187,6 +197,8 @@ DiskWipeVerification/
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## Module Reference
 
 ### DiskAnalysisEngine.ps1 (Compiled C# Engine)
@@ -206,6 +218,8 @@ This is the performance-critical module. It compiles a C# class `DiskAnalysisEng
 | `GetTotalLeftoverCount()` | Returns the total number of leftover sectors found (may exceed the detail cap) |
 | `RecordLeftover(long sectorNum, int sectorSize, SectorResult result)` | Records a leftover finding |
 
+<div style="page-break-after: always;"></div>
+
 **Data structures:**
 
 - `SectorResult` -- Status (0=Wiped, 1=NotWiped, 2=Suspicious, 3=Unreadable), Pattern string, Confidence int
@@ -213,6 +227,8 @@ This is the performance-critical module. It compiles a C# class `DiskAnalysisEng
 - `LeftoverEntry` -- SectorNumber, DiskOffset, Status string, Pattern, Confidence
 
 **Leftover tracking:** Caps stored entries at 500 (`MaxLeftovers`) to prevent memory issues on heavily unwiped disks, but `TotalLeftoverCount` tracks the true total.
+
+<div style="page-break-after: always;"></div>
 
 ### Get-SampleLocations.ps1
 
@@ -222,6 +238,8 @@ Generates a sorted, deduplicated list of sector indices to sample:
 - Remaining count filled with random indices using long-safe generation
 
 Uses `HashSet<long>` for O(1) dedup. Only called when Full Disk Scan is unchecked (Debug Mode).
+
+<div style="page-break-after: always;"></div>
 
 ### Get-ShannonEntropy.ps1 (Legacy)
 
@@ -259,6 +277,8 @@ Where:
 | 6.0-7.5 | High randomness | Encrypted data |
 | 7.5-8.0 | Very high randomness | Cryptographic random, wiped data |
 
+<div style="page-break-after: always;"></div>
+
 ### Get-ByteDistributionScore.ps1 (Legacy)
 
 **Chi-Square Test:**
@@ -277,6 +297,8 @@ Uses fixed `int[256]` array (optimized from hashtable in v3.9.0210).
 | 0.75-0.90 | Good uniformity |
 | 0.50-0.75 | Moderate uniformity |
 | < 0.50 | Poor uniformity (structured data) |
+
+<div style="page-break-after: always;"></div>
 
 ### Test-FileSignatures.ps1 (Legacy)
 
@@ -297,6 +319,8 @@ Uses fixed `int[256]` array (optimized from hashtable in v3.9.0210).
 | EXE | `4D 5A 90 00` | MZ with valid header |
 
 Signatures are 4+ bytes to avoid false positives. Matching only occurs when entropy < 7.0.
+
+<div style="page-break-after: always;"></div>
 
 ### New-HtmlReport.ps1
 
@@ -320,6 +344,8 @@ Generates a self-contained HTML report with inline CSS. No external dependencies
 | `TotalLeftoverCount` | long | Total leftovers found (may be larger than Leftovers array) |
 
 **Report sections:** Disk Information, Analysis Summary (cards), Detailed Sector Analysis, Detected Wipe Patterns, Data Leftover Analysis (conditional banners: green/yellow/red), Verification Methodology, Certification (signature lines).
+
+<div style="page-break-after: always;"></div>
 
 ### Convert-HtmlToPdf.ps1
 
@@ -352,6 +378,8 @@ Returns `$true` if a PDF was successfully created, `$false` otherwise.
 "C:\Program Files (x86)\wkhtmltopdf\bin\wkhtmltopdf.exe"
 ```
 
+<div style="page-break-after: always;"></div>
+
 ### Connectors
 
 - **DoEvents.ps1:** Wraps `[System.Windows.Forms.Application]::DoEvents()` to pump the GUI message queue.
@@ -359,6 +387,8 @@ Returns `$true` if a PDF was successfully created, `$false` otherwise.
 - **Write-Console.ps1:** Appends a timestamped, color-coded message to the RichTextBox console and calls `DoEvents`.
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## Analysis Algorithms
 
@@ -382,6 +412,8 @@ Layer 3: Signature Detection (Only for entropy < 7.0)
 +-- Check file magic numbers
 +-- If found -> NOT WIPED (confidence 95%)
 ```
+
+<div style="page-break-after: always;"></div>
 
 ### Analysis Decision Tree
 
@@ -426,6 +458,8 @@ Layer 3: Signature Detection (Only for entropy < 7.0)
                                                         Analysis
 ```
 
+<div style="page-break-after: always;"></div>
+
 ### DoD 5220.22-M Detection
 
 The DoD 5220.22-M standard specifies a 3-pass wipe:
@@ -447,37 +481,41 @@ confidence = (entropy/8) * 60 + distribution * 40
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## GUI Components
 
 ### Main Window Layout
 
 ```
 +-----------------------------------------------------------------------------+
-|  Options                                                                     |
-|  [Debug Mode]                                                                |
+|  Options                                                                    |
+|  [Debug Mode]                                                               |
 +--------------------------------+--------------------------------------------+
 |                                |                                            |
 |  PARAMETERS                    |  AVAILABLE DISKS                           |
 |  ----------------              |  ----------------                          |
-|  Technician: [___________]    |  [Refresh Disks]                           |
-|  Sample Size: [locked    ]    |  +------------------------------------+    |
-|  [x] Full Disk Scan (locked) |  | Disk 0 | Samsung SSD | 256GB       |    |
-|  Sector Size: [512      v]    |  | Disk 1 | WD Blue     | 1TB         |    |
-|  Report Format: [PDF    v]    |  | Disk 2 | USB Drive   | 32GB        |    |
-|  Report Location: [Browse]    |  +------------------------------------+    |
+|  Technician: [___________]     |  [Refresh Disks]                           |
+|  Sample Size: [locked    ]     |  +------------------------------------+    |
+|  [x] Full Disk Scan (locked)   |  | Disk 0 | Samsung SSD | 256GB       |    |
+|  Sector Size: [512      v]     |  | Disk 1 | WD Blue     | 1TB         |    |
+|  Report Format: [PDF    v]     |  | Disk 2 | USB Drive   | 32GB        |    |
+|  Report Location: [Browse]     |  +------------------------------------+    |
 |                                |                                            |
 |  SCAN                          |  CONSOLE                                   |
 |  ----                          |  -------                                   |
 |  Status: Ready                 |  +------------------------------------+    |
-|  ################------  60%   |  | [12:34:56] Scanning chunk 5000    |    |
-|  [Start Scan] [Cancel]        |  | [12:34:57] Speed: 125 MB/s        |    |
-|                                |  | [12:34:58] ETA: 2m 30s            |    |
-|  +--------------------+       |  +------------------------------------+    |
-|  | VERIFICATION RESULT|       |                                            |
-|  |      PASSED        |       |                                            |
-|  +--------------------+       |                                            |
+|  ################------  60%   |  | [12:34:56] Scanning chunk 5000     |    |
+|  [Start Scan] [Cancel]         |  | [12:34:57] Speed: 125 MB/s         |    |
+|                                |  | [12:34:58] ETA: 2m 30s             |    |
+|  +--------------------+        |  +------------------------------------+    |
+|  | VERIFICATION RESULT|        |                                            |
+|  |      PASSED        |        |                                            |
+|  +--------------------+        |                                            |
 +--------------------------------+--------------------------------------------+
 ```
+
+<div style="page-break-after: always;"></div>
 
 ### GUI Component Hierarchy
 
@@ -512,6 +550,8 @@ MainWindow (Form)
 ```
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## Data Flow
 
@@ -576,6 +616,8 @@ Finally: Close stream, re-enable UI
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## Data Structures
 
 ### Results Hashtable
@@ -620,6 +662,8 @@ public struct LeftoverEntry {
 }
 ```
 
+<div style="page-break-after: always;"></div>
+
 ### Sample Locations Object
 
 ```powershell
@@ -638,6 +682,8 @@ public struct LeftoverEntry {
 ```
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## Memory Management
 
@@ -670,6 +716,8 @@ At most 500 `LeftoverEntry` structs are stored. `TotalLeftoverCount` tracks the 
 
 UI updates every 250ms via `Stopwatch`, not every sector. Eliminates millions of unnecessary `DoEvents` calls.
 
+<div style="page-break-after: always;"></div>
+
 ### Memory Usage Summary
 
 | Component | Memory |
@@ -682,6 +730,8 @@ UI updates every 250ms via `Stopwatch`, not every sector. Eliminates millions of
 | **Total for any scan** | **~1-2 MB** |
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## Extending the Tool
 
@@ -711,6 +761,8 @@ Detection logic lives in `DiskAnalysisEngine.ps1` inside the `AnalyzeSector` met
 
 To add a new pattern, insert a new condition block in the appropriate entropy range. Return a `SectorResult` with the appropriate status code and pattern string.
 
+<div style="page-break-after: always;"></div>
+
 ### Adding a New Report Section
 
 1. Open `Modules/New-HtmlReport.ps1`
@@ -732,6 +784,8 @@ To add a new pattern, insert a new condition block in the appropriate entropy ra
 // In DiskAnalysisEngine.ps1, inside the C# block:
 public static int MaxLeftovers = 500;  // Change this value
 ```
+
+<div style="page-break-after: always;"></div>
 
 ### Changing Verification Thresholds
 
@@ -765,6 +819,8 @@ elseif ($wipedPercent -ge 95) {   # Adjust threshold
 <tr><td>Asset Tag</td><td>$AssetTag</td></tr>
 ```
 
+<div style="page-break-after: always;"></div>
+
 ### Creating a Command-Line Version
 
 ```powershell
@@ -788,6 +844,8 @@ $results = Invoke-DiskAnalysis -DiskNumber $DiskNumber ...
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## Performance Architecture
 
 ### Why C# via Add-Type?
@@ -802,6 +860,8 @@ PowerShell's `foreach` loops are interpreted. A 500 GB disk at 512 bytes/sector 
 - **Error handling:** Both paths wrap I/O in `try/catch`. Failed reads produce "Unreadable" sectors. Partial reads on the last chunk are handled gracefully.
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## Build & Distribution
 
@@ -818,6 +878,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 The `EXE.ps1` file is designed to be compiled to a standalone executable using tools like PS2EXE or Win-PS2EXE. The `Load-Components.ps1` bridge ensures the executable only needs to bootstrap the component loader.
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## Troubleshooting
 
@@ -843,6 +905,8 @@ Get-Disk | Format-Table Number, FriendlyName, Size, OperationalStatus
 **Cause:** Physical drives have 1-2 unreachable sectors at the end (HPA/DCO reserved area).
 
 **Solution (v4.0+):** Handled automatically. Sample locations capped at `TotalSectors - 2`. Both scan paths have try/catch with "Unreadable" fallback.
+
+<div style="page-break-after: always;"></div>
 
 #### PDF Generation Fails
 
@@ -872,6 +936,8 @@ Get-Disk | Format-Table Number, FriendlyName, Size, OperationalStatus
 1. Use full disk scan (default)
 2. Add specific file signatures for expected data types
 
+<div style="page-break-after: always;"></div>
+
 ### Debug Mode
 
 Enable Debug Mode via Options menu to:
@@ -890,19 +956,15 @@ Write-Console "Elapsed: $($stopwatch.Elapsed.TotalSeconds) seconds" "Cyan"
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## Version History
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 3.8.0116.01 | 2026-01-08 | Initial release |
-| 3.8.0116.02 | 2026-01-11 | Improved algorithms and reports |
-| 3.8.0116.03 | 2026-01-12 | Modular architecture |
-| 3.9.0203.01 | 2026-02-03 | Memory optimization (streaming histogram, HashSet sampling) |
-| 3.9.0209.01 | 2026-02-09 | Data leftover markers module, shared FileStream |
-| 3.9.0210.01 | 2026-02-10 | Time-based UI refresh, array optimization, bug fixes |
-| 4.0 | 2026-02-13 | Compiled C# engine, batched 1MB I/O, default full disk scan, Debug Mode, long-safe sampling, boundary-safe sectors, status wildcard fix |
+For the Version History please have a look at the HISTORY.md
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## References
 
@@ -913,12 +975,13 @@ Write-Console "Elapsed: $($stopwatch.Elapsed.TotalSeconds) seconds" "Cyan"
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## License
 
-Copyright (c) 2026 Yannick Morgenthaler / JSW
+Copyright (c) 2026 Yannick Morgenthaler / JSW. All rights reserved.
 
 Contact:
 - yannick.morgenthaler@jsw.swiss
 - yannick@n1x.ch
 - yannick@projectresilience.ch
-- yannick.morgenthaler@4058.net

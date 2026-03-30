@@ -16,6 +16,8 @@ A PowerShell-based GUI application for verifying complete data sanitization on d
 - **GUI Interface** - User-friendly Windows Forms interface with dark theme
 - **Debug Mode** - Menu option to unlock sample size controls for smaller test runs
 
+<div style="page-break-after: always;"></div>
+
 ## Requirements
 
 - **Operating System**: Windows 10/11 or Windows Server 2016+
@@ -24,13 +26,13 @@ A PowerShell-based GUI application for verifying complete data sanitization on d
 - **RAM**: Minimum 4GB, recommended 8GB+
 - **PDF Export (optional):** Microsoft Edge, Google Chrome, Brave, wkhtmltopdf, or Microsoft Word
 
-<div style="page-break-after: always;"></div>
-
 ## Installation
 
 1. Clone or download this repository
 2. Ensure all files maintain their folder structure
 3. Run the script as Administrator
+
+<div style="page-break-after: always;"></div>
 
 ## Usage
 
@@ -79,6 +81,8 @@ Reads a configurable number of random sectors across the disk surface. Fast and 
 | **VERIFIED CLEAN** | 99.5%+ sectors show wipe patterns - disk successfully sanitized |
 | **MOSTLY CLEAN** | 95-99.5% wiped - manual review recommended |
 | **NOT VERIFIED** | <95% wiped - recoverable data detected |
+
+<div style="page-break-after: always;"></div>
 
 ### Detected Wipe Patterns
 
@@ -334,23 +338,27 @@ The collection is capped at **500 entries** by default. If more than 500 sectors
 
 ## Version History
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 3.8.0116.01 | 2026-01-08 | Initial release |
-| 3.8.0116.02 | 2026-01-11 | Improved algorithms and reports |
-| 3.8.0116.03 | 2026-01-12 | Modular architecture |
-| 3.9.0203.01 | 2026-02-03 | Memory optimization for large sample sizes |
-| 3.9.0209.01 | 2026-02-09 | Data leftover markers module, report section for manual review |
-| 3.9.0210.01 | 2026-02-10 | Time-based UI refresh, optimized byte distribution scoring, bug fixes |
-| 4.0 | 2026-02-13 | Compiled C# analysis engine, batched 1MB I/O, default full disk scan, Debug Mode menu, long-safe sampling, boundary-safe sector access, status wildcard fix, try/catch around all disk I/O |
+For the Version History please have a look at the HISTORY.md
 
 <div style="page-break-after: always;"></div>
 
 ## Author
+> This tool was developed for a Project at JSW. This tool will not be maintained by JSW but by the original Author.
 
 **Yannick Morgenthaler**
-Company: JSW
-Contact: yannick.morgenthaler@jsw.swiss
+
+**JSW / AIP Plus**
+- Company: JSW
+- Contact: yannick.morgenthaler@jsw.swiss
+
+**N1X**
+- Company: N1X
+- Contact: yannick@n1x.ch
+
+**Project Resilience**
+- Company: ProjectResilience
+- Contact: yannick@projectresilience.ch
+
 
 ## License
 

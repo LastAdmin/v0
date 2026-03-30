@@ -11,7 +11,8 @@ function New-HtmlReport {
         [string]$OverallStatus,
         [int]$SectorSize,
         [object[]]$Leftovers = @(),
-        [long]$TotalLeftoverCount = 0
+        [long]$TotalLeftoverCount = 0,
+        [string]$ComputerSerial
     )
 
     $statusClass = if ($OverallStatus -like "VERIFIED*") {
@@ -21,6 +22,28 @@ function New-HtmlReport {
     } else {
         "failed"
     }
+
+    $Logo1 = "$WorkingDirectory" + "\GUI\Icons\report_logo.jpg"
+    $Logo2 = "$WorkingDirectory" + "\GUI\Icons\report_logo.png"
+    Write-Console "Testing logo paths..." "Yellow"
+    Write-Console "$Logo1"
+    Write-Console "$Logo2"
+    $Logo1TestPath = Test-Path $Logo1
+    $Logo2TestPath = Test-Path $Logo2
+
+    if ($Logo1TestPath -eq $true) {
+        $logoPath = $Logo1
+    }
+    elseif ($Logo2TestPath -eq $true) {
+        $logoPath = $Logo2
+    }
+    else {
+        Write-Console "Logo for Report not found" "Red"
+    }
+
+    Write-Console "Format logo path to browser format..." "Yellow"
+    $logoURI = "file:///$($logoPath -replace '\\','/')"
+    Write-Console "$logoURI"
 
     $html = @"
 <!DOCTYPE html>
@@ -173,11 +196,20 @@ function New-HtmlReport {
             font-size: 10pt;
             color: #333;
         }
+        .header {
+            display: grid;
+            grid-template-columns: auto auto auto;
+            margin-bottom: 25px;
+        }
+        .logo {
+            max-height: 40px;
+            align-self: start;
+        }
         .report-id {
             font-size: 9pt;
             color: #666;
-            text-align: right;
             margin-bottom: 10px;
+            text-align: end;
         }
         .page-break {
             page-break-before: always;
@@ -234,7 +266,11 @@ function New-HtmlReport {
 </head>
 <body>
     <div class="container">
-        <div class="report-id">Report ID: WV-$(Get-Date -Format 'yyyyMMddHHmmss')-$([System.Guid]::NewGuid().ToString().Substring(0,8).ToUpper())</div>
+        <div class="header">
+            <img src="$logoURI" class="logo" />
+            <div></div>
+            <div class="report-id">Report ID: WV-$(Get-Date -Format 'yyyyMMddHHmmss')-$([System.Guid]::NewGuid().ToString().Substring(0,8).ToUpper())</div>
+        </div>
 
         <h1>Disk Wipe Verification Report</h1>
 
@@ -246,6 +282,7 @@ function New-HtmlReport {
             <h2>Disk Information</h2>
             <table>
                 <tr><th style="width:35%">Property</th><th>Value</th></tr>
+                <tr><td>Computer Serial Number</td><td>$ComputerSerial</td></tr>
                 <tr><td>Disk Number</td><td>$DiskNumber</td></tr>
                 <tr><td>Model / Friendly Name</td><td>$($Disk.FriendlyName)</td></tr>
                 <tr><td>Serial Number</td><td>$(if($Disk.SerialNumber){"$($Disk.SerialNumber)"}else{"N/A"})</td></tr>

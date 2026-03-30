@@ -43,6 +43,8 @@ This design was chosen for simplicity and because PowerShell's `$script:` scopin
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## 2. Bootstrap Chain
 
 The application boots through a strict chain of dot-sourced files. Understanding this chain is critical because **PowerShell dot-sourcing executes code in the caller's scope**, meaning every variable and function defined in a dot-sourced file becomes available in the scope that called it.
@@ -102,6 +104,8 @@ In a production build, the second load is redundant but harmless (function redef
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## 3. Global State and Scope
 
 Because every file is dot-sourced, the entire application shares a **single flat scope**. There are no namespaces, no classes, and no modules (in the PowerShell module sense). All GUI controls, all functions, and all variables live in the same scope tree.
@@ -131,6 +135,8 @@ Because every file is dot-sourced, the entire application shares a **single flat
 | `$FileSignatures` | Main.ps1 | Test-FileSignatures.ps1 | `hashtable` | Signature lookup table |
 | `$diskNumber` | Start-Scan.ps1 | Get-Parameters.ps1, Main.ps1 | `int` | Selected disk number |
 
+<div style="page-break-after: always;"></div>
+
 ### The `$script:cancelRequested` pattern
 
 Cancellation uses a `$script:` scoped boolean. When the cancel button is clicked, `Cancel-Scan` sets `$script:cancelRequested = $true`. The scan loop in `Main-Process` checks this flag at the start of each iteration. Because the loop periodically calls `DoEvents`, the cancel button's click handler gets a chance to execute and set the flag.
@@ -155,6 +161,8 @@ Loop checks $script:cancelRequested -> breaks
 ```
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## 4. GUI Framework
 
@@ -213,6 +221,8 @@ $MainWindow (1000 x 700, fixed size, no maximize)
 
 All positioning is done with absolute pixel coordinates via `Location($x, $y)`. There is no layout manager, no auto-sizing, and no responsive behavior. The form has a fixed border style (`Fixed3D`) and `MaximizeBox = $false`.
 
+<div style="page-break-after: always;"></div>
+
 ### Menu Bar and Debug Mode
 
 The GUI includes an "Options" menu with a "Debug Mode" toggle. When Debug Mode is enabled:
@@ -241,6 +251,8 @@ $StartScan.Add_Click({ Start-Scan })
 Each handler calls a function defined in a corresponding `GUI/ActionModules/*.ps1` file.
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## 5. Scan Lifecycle
 
@@ -303,6 +315,8 @@ The full lifecycle from button click to completion:
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## 6. Compiled C# Analysis Engine
 
 ### File: Modules/DiskAnalysisEngine.ps1
@@ -358,6 +372,8 @@ if (localFreq[0xFF] == length) -> Wiped, "One-filled (0xFF)", confidence 100
 ```
 
 Fastest check. If all bytes are the same value, it is a standard wipe pattern.
+
+<div style="page-break-after: always;"></div>
 
 **Step 4: Compute per-sector entropy and chi-square distribution**
 
@@ -419,6 +435,8 @@ Returns NOT Wiped, "Structured data detected", confidence 85.
 **Step 9: Fallback**
 
 Returns NOT Wiped, "Unknown data pattern", confidence 50.
+
+<div style="page-break-after: always;"></div>
 
 ### AnalyzeChunk
 
@@ -484,6 +502,8 @@ Computes Shannon entropy from the global frequency table accumulated across all 
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## 7. Legacy PowerShell Analysis Modules
 
 These modules are the original interpreted implementations. They are still loaded and available for standalone debugging but are **not called during normal scan operations**. The compiled C# engine replaces all of them in the hot path.
@@ -534,6 +554,8 @@ Returns: hashtable { Status, Pattern, Confidence, Details }
 ```
 
 Applies the same classification logic as `AnalyzeSector` in C# but in interpreted PowerShell.
+
+<div style="page-break-after: always;"></div>
 
 ### Test-FileSignatures.ps1
 
@@ -587,6 +609,8 @@ Returns a lightweight hashtable with `IsFullScan = $true` and no array. Memory: 
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## 8. Connector Functions
 
 ### DoEvents.ps1
@@ -619,6 +643,8 @@ Collects all scan parameters from GUI controls into a single hashtable:
 - `technician`, `diskNumber`, `sampleSize` (cast to `[long]`), `sectorSize` (cast to `[int]`), `reportFormat`, `reportPath`, `reportFile` (with timestamp).
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## 9. GUI Action Modules
 
@@ -660,6 +686,8 @@ Empty placeholder function. Reserved for future DataGridView interaction handlin
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## 10. GUI Element Definitions
 
 Each file in `GUI/Elements/` creates one or more WinForms controls:
@@ -695,6 +723,8 @@ Each file in `GUI/Elements/` creates one or more WinForms controls:
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## 11. GUI Element Factories
 
 Each file in `GUI/NewElements/` provides a factory function:
@@ -720,6 +750,8 @@ Each file in `GUI/NewElements/` provides a factory function:
 These factories apply consistent dark-theme styling (dark backgrounds, light text, Segoe UI font) and return configured controls ready for use.
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## 12. Data Structures In-Depth
 
@@ -770,6 +802,7 @@ $results = @{
 Dictionary<string, int> patternCounts
 // Converted to $results.Patterns hashtable after scan
 ```
+<div style="page-break-after: always;"></div>
 
 ### 12.4 File Signatures Table
 
@@ -792,6 +825,8 @@ $FileSignatures = @{
 All signatures are 4+ bytes. The original 2-byte `"MZ"` signature was removed because random data has a ~1/65536 chance of matching per sector.
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## 13. Performance Architecture
 
@@ -831,6 +866,8 @@ File signature checking only occurs when `entropy < 7.0`. This avoids false posi
 | **Total** | **~1-2 MB** |
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## 14. Threading Model and GUI Responsiveness
 
@@ -875,6 +912,8 @@ When no pending messages exist, `DoEvents` returns almost instantly (~0.01ms). I
 Maximum delay between clicking "Cancel" and the scan checking `$script:cancelRequested` is 250ms. This feels instantaneous.
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## 15. Error Handling Strategy
 
@@ -944,6 +983,8 @@ If any module fails to load, the scan aborts with a fatal error message.
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## 16. Report Generation Pipeline
 
 ```
@@ -992,6 +1033,8 @@ $statusClass = if ($OverallStatus -like "VERIFIED*") { "verified" }
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## 17. Known Limitations and Edge Cases
 
 ### 17.1 Full Scan GetEnumerator
@@ -1020,98 +1063,15 @@ Physical drives often have 1-2 unreachable sectors at the very end (HPA/DCO rese
 
 ---
 
+<div style="page-break-after: always;"></div>
+
 ## 18. Changelog (Code-Level)
 
-### v4.0 (2026-02-13)
-
-**Files changed:** `Main.ps1`, `Modules/DiskAnalysisEngine.ps1` (new), `GUI/GUI.ps1`, `GUI/Elements/FullDiskCheckBox.ps1`, `GUI/Elements/SampleSize.ps1`, `Modules/Get-SampleLocations.ps1`, `Modules/New-HtmlReport.ps1`
-
-1. **DiskAnalysisEngine.ps1 -- Compiled C# engine**
-   - All byte-level analysis (entropy, distribution, ASCII ratio, signatures, classification) compiled to .NET via `Add-Type`
-   - `AnalyzeSector` processes one sector with full classification in compiled code
-   - `AnalyzeChunk` processes 1 MB buffers (2048 sectors) for full-disk mode
-   - `RecordLeftover` tracks NOT Wiped/Suspicious entries with a cap of 500
-   - `ComputeGlobalEntropy` calculates overall entropy from accumulated frequency table
-   - 100-500x throughput improvement over interpreted PowerShell
-
-2. **Main.ps1 -- Dual scan paths with compiled engine**
-   - Full disk: sequential 1 MB chunk reads -> `AnalyzeChunk()`
-   - Sample: seek + read single sector -> `AnalyzeSector()`
-   - Both paths use try/catch around disk I/O with graceful "Unreadable" fallback
-   - Partial-read handling for last chunk in full disk mode
-   - Status matching fixed from `-eq "VERIFIED*"` to `-like "VERIFIED*"`
-   - Speed and ETA display during scan
-
-3. **GUI.ps1 -- Menu bar with Debug Mode**
-   - "Options" menu with "Debug Mode" toggle
-   - When enabled: unlocks FullDiskCheckBox and SampleSize for test runs
-   - When disabled: forces full disk scan and locks controls
-
-4. **FullDiskCheckBox.ps1 + SampleSize.ps1 -- Default full scan**
-   - FullDiskCheckBox checked and disabled by default
-   - SampleSize disabled with darkened background by default
-
-5. **Get-SampleLocations.ps1 -- Long-safe and boundary-safe**
-   - Uses `HashSet<long>` for O(1) dedup
-   - Long-safe random generation (combines two 31-bit randoms)
-   - Last sectors capped at `TotalSectors - 2` to avoid HPA/DCO reserved area
-   - Converts to sorted `[long[]]` array
-
-6. **New-HtmlReport.ps1 -- Updated status matching and leftover display**
-   - Status matching uses `-like` operator
-   - Leftover section with conditional banners (green/yellow/red based on count)
-   - Accepts `Leftovers` (LeftoverEntry[]) and `TotalLeftoverCount` parameters
-
-### v3.9.0210.01 (2026-02-10)
-
-**Files changed:** `Main.ps1`, `GUI/ActionModules/Start-Scan.ps1`, `Modules/Get-ByteDistributionScore.ps1`
-
-1. **Main.ps1 -- Time-based UI refresh**
-   - Added `Stopwatch`-based timer with 200ms interval (later updated to 250ms in v4.0)
-   - Both scan loops call `DoEvents` when timer elapses, in addition to percent-change trigger
-
-2. **Start-Scan.ps1 -- ResultLabel bug fix**
-   - Changed `$ResultLabel.Text = Color 255 255 255` to `$ResultLabel.ForeColor = Color 255 255 255` and `$ResultLabel.Text = ""`
-
-3. **Get-ByteDistributionScore.ps1 -- Array optimization**
-   - Replaced hashtable-based frequency counting with fixed `int[256]` array
-
-### v3.9.0209.01 (2026-02-09)
-
-**Files changed:** `Main.ps1`, `Modules/Get-DataLeftoverMarkers.ps1` (new), `Modules/New-HtmlReport.ps1`, `Modules/Get-SampleLocations.ps1`
-
-- Added `Get-DataLeftoverMarkers.ps1` module with three functions
-- Integrated marker collection into scan loops in `Main.ps1`
-- Added data leftover section to HTML report
-- Fixed critical memory crash for full-disk scans (streaming iterator pattern)
-- Shared `FileStream` for the entire scan instead of per-sector opens
-- `Get-SampleLocations` returns lightweight object for full scans (no array)
-
-### v3.9.0203.01 (2026-02-03)
-
-**Files changed:** `Main.ps1`, `Modules/Get-SampleLocations.ps1`, `Modules/Get-ShannonEntropy.ps1`
-
-- Replaced `ArrayList` byte storage with running `long[256]` histogram
-- Added `Get-ShannonEntropyFromHistogram` function
-- Replaced array concatenation with `HashSet<long>` in `Get-SampleLocations`
-- Memory usage reduced from ~200MB to ~2MB for 100K-sector scans
-
-### v3.8.0116.03 (2026-01-12)
-
-- Split monolithic script into modular architecture (Modules/, Connectors/, GUI/)
-- Introduced element factory pattern (GUI/NewElements/)
-- Separated action handlers into GUI/ActionModules/
-
-### v3.8.0116.02 (2026-01-11)
-
-- Improved analysis algorithms and thresholds
-- Enhanced HTML report layout and styling
-
-### v3.8.0116.01 (2026-01-08)
-
-- Initial release as a single-file PowerShell script
+> Does not exist yet
 
 ---
+
+<div style="page-break-after: always;"></div>
 
 ## Appendix: Status Codes
 
@@ -1142,5 +1102,9 @@ Physical drives often have 1-2 unreachable sectors at the very end (HPA/DCO rese
 
 ## License
 
-Copyright (c) 2026 Yannick Morgenthaler / JSW
-Contact: yannick.morgenthaler@jsw.swiss
+Copyright (c) 2026 Yannick Morgenthaler / JSW. All rights reserved.
+
+Contact:
+- yannick.morgenthaler@jsw.swiss
+- yannick@n1x.ch
+- yannick@projectresilience.ch

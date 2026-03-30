@@ -1,4 +1,3 @@
-#Requires -RunAsAdministrator
 
 <#
 .SYNOPSIS
@@ -25,6 +24,8 @@
     16.01.2026      Yannick Morgenthaler    Script was created initially.
 #>
 
-. .\Load-Components.ps1
+#. .\Load-Components.ps1
+#
+#Load-Components
 
-Load-Components
+#Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File C:\Users\Yannick Morgenthaler\Documents\GitHub\CoreProtocol\Load-Components.ps1" -Verb RunAs Administrator
