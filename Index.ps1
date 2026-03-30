@@ -33,10 +33,19 @@
 . .\Modules\Get-PrintableAsciiRatio.ps1
 . .\Modules\Get-SampleLocations.ps1
 . .\Modules\Get-ShannonEntropy.ps1
+. .\Modules\Get-WorkingDirectory.ps1
 . .\Modules\New-HtmlReport.ps1
 . .\Modules\Read-DiskSector.ps1
 . .\Modules\Test-FileSignatures.ps1
 . .\Modules\Test-SectorWiped.ps1
+
+#======================
+# HardwareReport Modules
+#======================
+. .\HardwareReport\Create-HardwareReport.ps1
+. .\HardwareReport\Create-HTMLReport.ps1
+. .\HardwareReport\Get-HardwareInfo.ps1
+. .\HardwareReport\Get-DiskStatus.ps1
 
 #======================
 # Connectors

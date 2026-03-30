@@ -1,34 +1,70 @@
 function Get-SampleLocations {
     <#
     .SYNOPSIS
-        Generates sector locations to sample for analysis
+        Generates sector locations to sample for analysis.
+        Uses a HashSet for O(1) dedup and long-safe random generation.
     .PARAMETER TotalSectors
-        Total number of sectors on the disk
+        Total number of sectors on the disk (long).
     .PARAMETER SampleSize
-        Desired number of samples
+        Desired number of samples.
     #>
     param(
         [long]$TotalSectors,
         [int]$SampleSize
     )
 
-    $sampleLocations = @()
+    # Clamp sample size to total sectors
+    if ($SampleSize -gt $TotalSectors) {
+        $SampleSize = [int][math]::Min($TotalSectors, [int]::MaxValue)
+    }
 
-    # First 100 sectors
-    $sampleLocations += 0..([math]::Min(99, $TotalSectors - 1))
+    # Use a HashSet<long> for O(1) deduplication instead of Select-Object -Unique
+    $locationSet = New-Object 'System.Collections.Generic.HashSet[long]'
 
-    # Last 100 sectors
-    $endStart = [math]::Max(0, $TotalSectors - 100)
-    $sampleLocations += $endStart..($TotalSectors - 1)
+    # Safe max: exclude the last 2 sectors which are often beyond the readable area
+    # (disk firmware/HPA/DCO can make the last sectors unreachable)
+    [long]$safeMax = [math]::Max(0, $TotalSectors - 2)
 
-    # Random samples from middle
-    $remaining = $SampleSize - $sampleLocations.Count
-    if ($remaining -gt 0 -and $TotalSectors -gt 200) {
+    # First 100 sectors (or fewer if disk is small)
+    $headCount = [math]::Min(100, $safeMax)
+    for ([long]$i = 0; $i -lt $headCount; $i++) {
+        $locationSet.Add($i) | Out-Null
+    }
+
+    # Last 100 sectors (within safe range)
+    $tailStart = [math]::Max(0, $safeMax - 100)
+    for ([long]$i = $tailStart; $i -lt $safeMax; $i++) {
+        $locationSet.Add($i) | Out-Null
+    }
+
+    # Random samples from the middle region
+    $remaining = $SampleSize - $locationSet.Count
+    if ($remaining -gt 0 -and $safeMax -gt 200) {
         $random = New-Object System.Random
-        for ($i = 0; $i -lt $remaining; $i++) {
-            $sampleLocations += $random.Next(100, $TotalSectors - 100)
+
+        # The middle range to sample from (between head and tail)
+        [long]$rangeStart = 100
+        [long]$rangeEnd = $safeMax - 100
+        [long]$rangeSize = $rangeEnd - $rangeStart
+
+        # Safety limit: don't spin forever if range is nearly exhausted
+        $maxAttempts = $remaining * 3
+        $attempts = 0
+
+        while ($locationSet.Count -lt $SampleSize -and $attempts -lt $maxAttempts) {
+            # Generate a long-safe random sector number:
+            # Combine two 31-bit random ints to produce a full-range [long]
+            [long]$rndLong = (([long]$random.Next()) -shl 31) -bor ([long]$random.Next())
+            [long]$sector = $rangeStart + ([math]::Abs($rndLong) % $rangeSize)
+
+            $locationSet.Add($sector) | Out-Null
+            $attempts++
         }
     }
 
-    return $sampleLocations | Select-Object -Unique | Sort-Object
+    # Convert to sorted array
+    $sorted = [long[]]::new($locationSet.Count)
+    $locationSet.CopyTo($sorted)
+    [Array]::Sort($sorted)
+    return $sorted
 }

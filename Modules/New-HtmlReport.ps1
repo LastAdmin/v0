@@ -9,16 +9,41 @@ function New-HtmlReport {
         [double]$WipedPercent,
         [double]$EntropyPercent,
         [string]$OverallStatus,
-        [int]$SectorSize
+        [int]$SectorSize,
+        [object[]]$Leftovers = @(),
+        [long]$TotalLeftoverCount = 0,
+        [string]$ComputerSerial
     )
 
-    $statusClass = if ($OverallStatus -eq "VERIFIED*") {
+    $statusClass = if ($OverallStatus -like "VERIFIED*") {
         "verified"
-    } elseif ($OverallStatus -eq "MOSTLY*") {
+    } elseif ($OverallStatus -like "MOSTLY*") {
         "warning"
     } else {
         "failed"
     }
+
+    $Logo1 = "$WorkingDirectory" + "\GUI\Icons\report_logo.jpg"
+    $Logo2 = "$WorkingDirectory" + "\GUI\Icons\report_logo.png"
+    Write-Console "Testing logo paths..." "Yellow"
+    Write-Console "$Logo1"
+    Write-Console "$Logo2"
+    $Logo1TestPath = Test-Path $Logo1
+    $Logo2TestPath = Test-Path $Logo2
+
+    if ($Logo1TestPath -eq $true) {
+        $logoPath = $Logo1
+    }
+    elseif ($Logo2TestPath -eq $true) {
+        $logoPath = $Logo2
+    }
+    else {
+        Write-Console "Logo for Report not found" "Red"
+    }
+
+    Write-Console "Format logo path to browser format..." "Yellow"
+    $logoURI = "file:///$($logoPath -replace '\\','/')"
+    Write-Console "$logoURI"
 
     $html = @"
 <!DOCTYPE html>
@@ -171,21 +196,81 @@ function New-HtmlReport {
             font-size: 10pt;
             color: #333;
         }
+        .header {
+            display: grid;
+            grid-template-columns: auto auto auto;
+            margin-bottom: 25px;
+        }
+        .logo {
+            max-height: 40px;
+            align-self: start;
+        }
         .report-id {
             font-size: 9pt;
             color: #666;
-            text-align: right;
             margin-bottom: 10px;
+            text-align: end;
         }
         .page-break {
             page-break-before: always;
             margin-top: 40px;
         }
+        .leftover-clean {
+            background: #d4edda;
+            color: #155724;
+            padding: 15px;
+            border-radius: 5px;
+            border-left: 5px solid #28a745;
+            margin: 10px 0 20px 0;
+            font-size: 11pt;
+        }
+        .leftover-warning {
+            background: #fff3cd;
+            color: #856404;
+            padding: 15px;
+            border-radius: 5px;
+            border-left: 5px solid #ffc107;
+            margin: 10px 0 20px 0;
+            font-size: 11pt;
+        }
+        .leftover-critical {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 5px;
+            border-left: 5px solid #dc3545;
+            margin: 10px 0 20px 0;
+            font-size: 11pt;
+        }
+        .hex-addr {
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 9pt;
+        }
+        .badge-not-wiped {
+            background: #dc3545;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 9pt;
+            font-weight: 600;
+        }
+        .badge-suspicious {
+            background: #ffc107;
+            color: #333;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 9pt;
+            font-weight: 600;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="report-id">Report ID: WV-$(Get-Date -Format 'yyyyMMddHHmmss')-$([System.Guid]::NewGuid().ToString().Substring(0,8).ToUpper())</div>
+        <div class="header">
+            <img src="$logoURI" class="logo" />
+            <div></div>
+            <div class="report-id">Report ID: WV-$(Get-Date -Format 'yyyyMMddHHmmss')-$([System.Guid]::NewGuid().ToString().Substring(0,8).ToUpper())</div>
+        </div>
 
         <h1>Disk Wipe Verification Report</h1>
 
@@ -197,6 +282,7 @@ function New-HtmlReport {
             <h2>Disk Information</h2>
             <table>
                 <tr><th style="width:35%">Property</th><th>Value</th></tr>
+                <tr><td>Computer Serial Number</td><td>$ComputerSerial</td></tr>
                 <tr><td>Disk Number</td><td>$DiskNumber</td></tr>
                 <tr><td>Model / Friendly Name</td><td>$($Disk.FriendlyName)</td></tr>
                 <tr><td>Serial Number</td><td>$(if($Disk.SerialNumber){"$($Disk.SerialNumber)"}else{"N/A"})</td></tr>
@@ -250,6 +336,72 @@ function New-HtmlReport {
         "<tr><td>$($pattern.Key)</td><td>$($pattern.Value)</td></tr>"
     })
             </table>
+        </div>
+
+        <div class="section-spacer"></div>
+
+        <div class="no-break">
+            <h2>Data Leftover Analysis</h2>
+$(if ($TotalLeftoverCount -eq 0) {
+@"
+            <div class="leftover-clean">
+                <strong>No Data Leftovers Detected</strong><br>
+                All analyzed sectors show wipe patterns consistent with successful data sanitization.
+                No residual data, file signatures, or structured content was found. No manual review is required.
+            </div>
+"@
+} elseif ($TotalLeftoverCount -le 50) {
+@"
+            <div class="leftover-warning">
+                <strong>$($TotalLeftoverCount.ToString('N0')) Sector(s) With Potential Data Detected</strong><br>
+                The following sectors contain data patterns that are inconsistent with a complete wipe.
+                A manual review of these addresses is recommended to determine if recoverable data is present.
+            </div>
+"@
+} else {
+@"
+            <div class="leftover-critical">
+                <strong>$($TotalLeftoverCount.ToString('N0')) Sector(s) With Potential Data Detected</strong><br>
+                A significant number of sectors contain residual data. This may indicate an incomplete wipe.
+                The table below shows the first $($Leftovers.Count) findings. A full manual review is strongly recommended.
+            </div>
+"@
+})
+$(if ($TotalLeftoverCount -gt 0) {
+    $tableRows = ""
+    $rowNum = 0
+    foreach ($entry in $Leftovers) {
+        $rowNum++
+        $hexOffset = "0x{0:X}" -f $entry.DiskOffset
+        $statusBadge = if ($entry.Status -eq "NOT Wiped") {
+            '<span class="badge-not-wiped">NOT Wiped</span>'
+        } else {
+            '<span class="badge-suspicious">Suspicious</span>'
+        }
+        $tableRows += "<tr><td>$rowNum</td><td class=`"hex-addr`">$($entry.SectorNumber.ToString('N0'))</td><td class=`"hex-addr`">$hexOffset</td><td>$statusBadge</td><td>$($entry.Pattern)</td><td>$($entry.Confidence)%</td></tr>`n"
+    }
+@"
+            <table>
+                <tr>
+                    <th style="width:5%">#</th>
+                    <th style="width:15%">Sector Number</th>
+                    <th style="width:18%">Disk Offset</th>
+                    <th style="width:12%">Status</th>
+                    <th>Detected Pattern</th>
+                    <th style="width:10%">Confidence</th>
+                </tr>
+                $tableRows
+            </table>
+"@
+    if ($TotalLeftoverCount -gt $Leftovers.Count) {
+@"
+            <p style="font-size:10pt; color:#666; font-style:italic;">
+                Showing $($Leftovers.Count) of $($TotalLeftoverCount.ToString('N0')) total findings.
+                The remaining $( ($TotalLeftoverCount - $Leftovers.Count).ToString('N0') ) sector addresses exceeded the report detail limit.
+            </p>
+"@
+    }
+})
         </div>
 
         <div class="section-spacer"></div>

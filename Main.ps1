@@ -92,43 +92,40 @@ function Main-Process {
             . .\Modules\Get-ByteHistogram.ps1
             . .\Modules\New-HtmlReport.ps1
             . .\Modules\Convert-HtmlToPdf.ps1
+            # Load compiled C# analysis engine for high-performance scanning
+            . .\Modules\DiskAnalysisEngine.ps1
             Write-Console "Modules Successfully Loaded!" "SpringGreen"
         }
         catch {
-            Write-Console "ERROR: could not load modules!" "Red"
+            Write-Console "ERROR: could not load modules: $_" "Red"
             exit 1
         }
 
-        # Removed short signatures like MZ (2 bytes) that cause false positives with random data
+        # Load file signatures into compiled engine
         Write-Console "Load File Signatures..." "Yellow"
         $StatusLabel.Text = "Status: Load File Signatures..."
         DoEvents
         $FileSignatures = @{
-            "PDF"      = @(0x25, 0x50, 0x44, 0x46, 0x2D)       # %PDF- (5 bytes)
-            "ZIP/DOCX" = @(0x50, 0x4B, 0x03, 0x04)             # PK.. (4 bytes)
-            "JPEG"     = @(0xFF, 0xD8, 0xFF, 0xE0)             # JPEG with JFIF (4 bytes)
-            "PNG"      = @(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A) # .PNG\r\n (6 bytes)
-            "GIF87"    = @(0x47, 0x49, 0x46, 0x38, 0x37, 0x61) # GIF87a (6 bytes)
-            "GIF89"    = @(0x47, 0x49, 0x46, 0x38, 0x39, 0x61) # GIF89a (6 bytes)
-            "RAR"      = @(0x52, 0x61, 0x72, 0x21, 0x1A, 0x07) # Rar!.. (6 bytes)
-            "7Z"       = @(0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C) # 7z.... (6 bytes)
-            "SQLite"   = @(0x53, 0x51, 0x4C, 0x69, 0x74, 0x65) # SQLite (6 bytes)
-            "NTFS"     = @(0xEB, 0x52, 0x90, 0x4E, 0x54, 0x46, 0x53) # NTFS boot sector (7 bytes)
-            "EXE"      = @(0x4D, 0x5A, 0x90, 0x00)             # MZ with valid header (4 bytes)
+            "PDF"      = [byte[]]@(0x25, 0x50, 0x44, 0x46, 0x2D)       # %PDF- (5 bytes)
+            "ZIP/DOCX" = [byte[]]@(0x50, 0x4B, 0x03, 0x04)             # PK.. (4 bytes)
+            "JPEG"     = [byte[]]@(0xFF, 0xD8, 0xFF, 0xE0)             # JPEG with JFIF (4 bytes)
+            "PNG"      = [byte[]]@(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A) # .PNG\r\n (6 bytes)
+            "GIF87"    = [byte[]]@(0x47, 0x49, 0x46, 0x38, 0x37, 0x61) # GIF87a (6 bytes)
+            "GIF89"    = [byte[]]@(0x47, 0x49, 0x46, 0x38, 0x39, 0x61) # GIF89a (6 bytes)
+            "RAR"      = [byte[]]@(0x52, 0x61, 0x72, 0x21, 0x1A, 0x07) # Rar!.. (6 bytes)
+            "7Z"       = [byte[]]@(0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C) # 7z.... (6 bytes)
+            "SQLite"   = [byte[]]@(0x53, 0x51, 0x4C, 0x69, 0x74, 0x65) # SQLite (6 bytes)
+            "NTFS"     = [byte[]]@(0xEB, 0x52, 0x90, 0x4E, 0x54, 0x46, 0x53) # NTFS boot sector (7 bytes)
+            "EXE"      = [byte[]]@(0x4D, 0x5A, 0x90, 0x00)             # MZ with valid header (4 bytes)
         }
-        $sigs = $FileSignatures.Keys
-        Write-Console "Loaded File Signatures:" "Magenta"
-        Write-Console "$sigs" "Info"
 
-        ##########################################################
-        # NOT NEEDED ANYMORE
-        # List available disks if no disk specified
-        #if (-not $PSBoundParameters.ContainsKey('DiskNumber')) {
-        #    Write-Console "Available Disks:" Yellow
-        #    Get-AvailableDisks
-        #    $DiskNumber = [int](Read-Host "Enter disk number to analyze")
-        #}
-        ##########################################################
+        # Pass signatures to the compiled C# engine
+        $sigNames = [string[]]($FileSignatures.Keys)
+        $sigBytesArr = [byte[][]]($sigNames | ForEach-Object { ,$FileSignatures[$_] })
+        [DiskAnalysisEngine]::SetSignatures($sigBytesArr, $sigNames)
+
+        Write-Console "Loaded File Signatures:" "Magenta"
+        Write-Console "$($sigNames -join ', ')" "Info"
 
         # Validate disk exists
         Write-Console "Validate Disk..." "Yellow"
@@ -141,6 +138,7 @@ function Main-Process {
         }
 
         $diskPath = "\\.\PhysicalDrive$DiskNumber"
+        $diskPathforEXE = "\PhysicalDrive$DiskNumber"
         $diskSize = $disk.Size
         $totalSectors = [math]::Floor($diskSize / $SectorSize)
 
@@ -157,100 +155,236 @@ function Main-Process {
         Write-Console "=====================================================" "Magenta"
         Write-Console "_____________________________________________________" "Gray"
 
-        ##########################################################
-        # CONFIRMATION IS DONE IN START-SCAN
-        # Confirmation
-        #$confirm = Read-Host "Proceed with analysis? (Y/N)"
-        #if ($confirm -ne 'Y' -and $confirm -ne 'y') {
-        #    Write-Console "Analysis cancelled." "Yellow"
-        #    exit 0
-        #}
-        ##########################################################
+        # Determine if this is a full disk scan (sequential) or sample scan (random)
+        $isFullDiskScan = $FullDiskCheckBox.Checked
 
-        # Build sample locations
-        Write-Console "Build Sample Locations..." "Yellow"
-        $StatusLabel.Text = "Status: Build Sample Locations..."
-        DoEvents
-        $sampleLocations = Get-SampleLocations -TotalSectors $totalSectors -SampleSize $sampleSize
+        if ($isFullDiskScan) {
+            Write-Console "Full Disk Scan: scanning all $($totalSectors.ToString('N0')) sectors sequentially..." "Yellow"
+            $StatusLabel.Text = "Status: Full Disk Scan - sequential read..."
+            DoEvents
+            $totalSamples = $totalSectors
+        } else {
+            Write-Console "Build Sample Locations..." "Yellow"
+            $StatusLabel.Text = "Status: Build Sample Locations..."
+            DoEvents
+            $sampleLocations = Get-SampleLocations -TotalSectors $totalSectors -SampleSize $sampleSize
+            $totalSamples = $sampleLocations.Count
+            Write-Console "Sampling $totalSamples sectors..." "Yellow"
+        }
 
-        # Initialize results
-        Write-Console "Initialize Results..." "Yellow"
-        $StatusLabel.Text = "Status: Initialize Results..."
+        # Initialize results and compiled engine counters
+        Write-Console "Initialize Analysis Engine..." "Yellow"
+        $StatusLabel.Text = "Status: Initialize Analysis Engine..."
         DoEvents
+
+        [DiskAnalysisEngine]::ResetGlobalCounters()
+        $patternCounts = New-Object 'System.Collections.Generic.Dictionary[string,int]'
+
         $results = @{
             Wiped = 0
             NotWiped = 0
             Suspicious = 0
             Unreadable = 0
-            Patterns = @{}
-            Details = @()
         }
 
-        $totalSamples = $sampleLocations.Count
-        $allBytes = New-Object System.Collections.ArrayList
+        Write-Console "Analyzing $($totalSamples.ToString('N0')) sectors..." "Yellow"
 
-        Write-Console "Analyzing $totalSamples sectors..." "Yellow"
+        # Open the disk stream once for the entire scan
+        $diskStream = $null
+        try {
+            $diskStream = [System.IO.File]::Open($diskPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        }
+        catch {
+            Write-Console "ERROR: Could not open disk stream: $_" "Red"
+            throw
+        }
 
-        $progress = 0
-        foreach ($sectorNum in $sampleLocations) {
-            if ($script:cancelRequested) {
-                Write-Console "Scan cancelled by user." "Red"
-                $StatusLabel.Text = "Status: Scan cancelled by user."
-                break
+        # I/O buffer: 2048 sectors per chunk = 1MB at 512-byte sectors
+        # This is the sweet spot for sequential disk reads
+        $chunkSectors = 2048
+        $chunkBuffer = New-Object byte[] ($SectorSize * $chunkSectors)
+
+        # Reusable buffer for single-sector reads (sample mode)
+        $readBuffer = New-Object byte[] $SectorSize
+
+        $progress = [long]0
+        $lastUiUpdate = [System.Diagnostics.Stopwatch]::StartNew()
+        $scanTimer = [System.Diagnostics.Stopwatch]::StartNew()
+        $uiUpdateIntervalMs = 250  # Refresh UI every 250ms
+
+        if ($isFullDiskScan) {
+            # ===== FULL DISK: read sequential 1MB chunks, process entirely in C# =====
+            $sectorIndex = [long]0
+            while ($sectorIndex -lt $totalSectors) {
+                if ($script:cancelRequested) {
+                    Write-Console "Scan cancelled by user." "Red"
+                    $StatusLabel.Text = "Status: Scan cancelled by user."
+                    break
+                }
+
+                # Calculate chunk size
+                $remainingSectors = $totalSectors - $sectorIndex
+                $currentChunkSectors = [math]::Min($chunkSectors, $remainingSectors)
+                $bytesToRead = [int]($currentChunkSectors * $SectorSize)
+
+                # Single I/O read for the entire chunk (sequential = no seek needed)
+                try {
+                    $bytesRead = $diskStream.Read($chunkBuffer, 0, $bytesToRead)
+                }
+                catch {
+                    $bytesRead = 0
+                }
+
+                if ($bytesRead -le 0) {
+                    # End of readable area
+                    $results.Unreadable += $currentChunkSectors
+                    $sectorIndex += $currentChunkSectors
+                    $progress += $currentChunkSectors
+                    continue
+                }
+
+                # Adjust actual sector count if a partial read occurred at the end of the disk
+                $actualSectorsRead = [math]::Floor($bytesRead / $SectorSize)
+                if ($actualSectorsRead -le 0) {
+                    $results.Unreadable += $currentChunkSectors
+                    $sectorIndex += $currentChunkSectors
+                    $progress += $currentChunkSectors
+                    continue
+                }
+                $unreadableInChunk = $currentChunkSectors - $actualSectorsRead
+                if ($unreadableInChunk -gt 0) { $results.Unreadable += $unreadableInChunk }
+
+                # Process only the bytes that were actually read
+                $chunkStats = [DiskAnalysisEngine]::AnalyzeChunk($chunkBuffer, [int]($actualSectorsRead * $SectorSize), $SectorSize, $patternCounts, [long]$sectorIndex)
+
+                $results.Wiped      += $chunkStats.Wiped
+                $results.NotWiped   += $chunkStats.NotWiped
+                $results.Suspicious += $chunkStats.Suspicious
+                $results.Unreadable += $chunkStats.Unreadable
+
+                $progress += $currentChunkSectors
+                $sectorIndex += $currentChunkSectors
+
+                # Throttled UI update
+                if ($lastUiUpdate.ElapsedMilliseconds -ge $uiUpdateIntervalMs) {
+                    $percent = [math]::Round(($progress / $totalSamples) * 100, 1)
+                    $ScanProgress.Value = [math]::Min([int]$percent, 100)
+                    $ProgressLabel.Text = "$percent%"
+
+                    # Calculate speed and ETA
+                    $elapsedSec = $scanTimer.Elapsed.TotalSeconds
+                    if ($elapsedSec -gt 0) {
+                        $sectorsPerSec = [math]::Round($progress / $elapsedSec)
+                        $mbPerSec = [math]::Round(($sectorsPerSec * $SectorSize) / 1MB, 1)
+                        $remainSectors = $totalSamples - $progress
+                        $etaSec = if ($sectorsPerSec -gt 0) { [math]::Round($remainSectors / $sectorsPerSec) } else { 0 }
+                        $eta = [TimeSpan]::FromSeconds($etaSec)
+                        $StatusLabel.Text = "Status: $($sectorIndex.ToString('N0'))/$($totalSectors.ToString('N0')) | ${mbPerSec} MB/s | ETA: $($eta.ToString('hh\:mm\:ss'))"
+                    }
+
+                    DoEvents
+                    $lastUiUpdate.Restart()
+                }
             }
+        } else {
+            # ===== SAMPLE SCAN: read individual sectors, analyze each in C# =====
+            foreach ($sectorNum in $sampleLocations) {
+                if ($script:cancelRequested) {
+                    Write-Console "Scan cancelled by user." "Red"
+                    $StatusLabel.Text = "Status: Scan cancelled by user."
+                    break
+                }
 
-            $progress++
-            $percent = [math]::Round(($progress / $totalSamples) * 100)
-            #Write-Progress -Activity "Scanning Disk Sectors" -Status "Sector $sectorNum ($percent%)" -PercentComplete $percent
-            $StatusLabel.Text = "Status: Scanning Sector: $sectorNum"
+                $progress++
 
-            # Refresh UI Status Every step
-            $ScanProgress.Value = $percent
-            $ProgressLabel.Text = "$percent%"
-            DoEvents
+                $offset = [long]$sectorNum * $SectorSize
 
-            $offset = [long]$sectorNum * $SectorSize
-            $sectorData = Read-DiskSector -DiskPath $diskPath -Offset $offset -Size $SectorSize
+                # Guard: skip sectors beyond the readable stream length
+                try {
+                    $diskStream.Seek($offset, [System.IO.SeekOrigin]::Begin) | Out-Null
+                    $bytesRead = $diskStream.Read($readBuffer, 0, $SectorSize)
+                }
+                catch {
+                    $bytesRead = 0
+                }
 
-            ##########################################################
-            # MAYBE NOT NEEDED / ONLY NEEDED IF SCRIPT BREAKS
-            # Log progress every 10%
-            #if ($percent % 10 -eq 0 -and $percent -ne $lastReportedPercent) {
-            #    Write-Console "Progress: $percent% ($progress / $totalSamples sectors)"
-            #    $lastReportedPercent = $percent
-            #}
-            ##########################################################
+                if ($bytesRead -lt $SectorSize) {
+                    $results.Unreadable++
+                    if (-not $patternCounts.ContainsKey("N/A")) { $patternCounts["N/A"] = 0 }
+                    $patternCounts["N/A"]++
+                    continue
+                }
 
-            $analysis = Test-SectorWiped -SectorData $sectorData
+                # Analyze single sector in compiled C#
+                $sectorResult = [DiskAnalysisEngine]::AnalyzeSector($readBuffer, 0, $SectorSize)
 
-            switch ($analysis.Status) {
-                "Wiped" { $results.Wiped++ }
-                "NOT Wiped" { $results.NotWiped++ }
-                "Suspicious" { $results.Suspicious++ }
-                "Unreadable" { $results.Unreadable++ }
-            }
+                switch ($sectorResult.Status) {
+                    0 { $results.Wiped++ }
+                    1 {
+                        $results.NotWiped++
+                        [DiskAnalysisEngine]::RecordLeftover([long]$sectorNum, $SectorSize, $sectorResult)
+                    }
+                    2 {
+                        $results.Suspicious++
+                        [DiskAnalysisEngine]::RecordLeftover([long]$sectorNum, $SectorSize, $sectorResult)
+                    }
+                    3 { $results.Unreadable++ }
+                }
 
-            if (-not $results.Patterns.ContainsKey($analysis.Pattern)) {
-                $results.Patterns[$analysis.Pattern] = 0
-            }
-            $results.Patterns[$analysis.Pattern]++
+                if ($patternCounts.ContainsKey($sectorResult.Pattern)) {
+                    $patternCounts[$sectorResult.Pattern]++
+                } else {
+                    $patternCounts[$sectorResult.Pattern] = 1
+                }
 
-            if ($sectorData) {
-                $allBytes.AddRange($sectorData) | Out-Null
+                # Throttled UI update
+                if ($lastUiUpdate.ElapsedMilliseconds -ge $uiUpdateIntervalMs) {
+                    $percent = [math]::Round(($progress / $totalSamples) * 100, 1)
+                    $ScanProgress.Value = [math]::Min([int]$percent, 100)
+                    $ProgressLabel.Text = "$percent%"
+
+                    $elapsedSec = $scanTimer.Elapsed.TotalSeconds
+                    if ($elapsedSec -gt 0) {
+                        $sectorsPerSec = [math]::Round($progress / $elapsedSec)
+                        $remainSectors = $totalSamples - $progress
+                        $etaSec = if ($sectorsPerSec -gt 0) { [math]::Round($remainSectors / $sectorsPerSec) } else { 0 }
+                        $eta = [TimeSpan]::FromSeconds($etaSec)
+                        $StatusLabel.Text = "Status: Sector $sectorNum | $sectorsPerSec sectors/s | ETA: $($eta.ToString('hh\:mm\:ss'))"
+                    }
+
+                    DoEvents
+                    $lastUiUpdate.Restart()
+                }
             }
         }
 
-        #Write-Progress -Activity "Scanning Disk Sectors" -Completed
-        Write-Console "Sector Scan Completed" "SpringGreen"
-        $StatusLabel.Text = "Status: Sector Scan Completed"
+        # Close the disk stream
+        if ($diskStream) {
+            $diskStream.Close()
+            $diskStream.Dispose()
+            $diskStream = $null
+        }
+
+        # Final UI update to 100%
+        $ScanProgress.Value = 100
+        $ProgressLabel.Text = "100%"
+        $scanElapsed = $scanTimer.Elapsed
+        Write-Console "Sector Scan Completed in $($scanElapsed.ToString('hh\:mm\:ss'))" "SpringGreen"
+        $StatusLabel.Text = "Status: Sector Scan Completed in $($scanElapsed.ToString('hh\:mm\:ss'))"
         DoEvents
 
-        # Calculate overall entropy
-        Write-Console "Calculate ovarall entropy..." "Yellow"
+        # Calculate overall entropy from the compiled engine's global counters
+        Write-Console "Calculate overall entropy..." "Yellow"
         $StatusLabel.Text = "Status: Calculate overall entropy..."
         DoEvents
-        $overallEntropy = Get-ShannonEntropy -Data $allBytes.ToArray()
+        $overallEntropy = [DiskAnalysisEngine]::ComputeGlobalEntropy()
         $entropyPercent = [math]::Round(($overallEntropy / 8) * 100, 2)
+
+        # Convert pattern counts dictionary to hashtable for report compatibility
+        $results.Patterns = @{}
+        foreach ($kv in $patternCounts.GetEnumerator()) {
+            $results.Patterns[$kv.Key] = $kv.Value
+        }
 
         # Calculate wiped percentage
         Write-Console "Calculate wiped percentage..." "Yellow"
@@ -272,9 +406,9 @@ function Main-Process {
             "NOT VERIFIED - Recoverable Data Detected"
         }
 
-        $statusColor = if ($OverallStatus -eq "VERIFIED*") {
+        $statusColor = if ($overallStatus -like "VERIFIED*") {
             "SpringGreen"
-        } elseif ($OverallStatus -eq "MOSTLY*") {
+        } elseif ($overallStatus -like "MOSTLY*") {
             "Yellow"
         } else {
             "Red"
@@ -299,6 +433,19 @@ function Main-Process {
             Write-Console "  $($pattern.Key): $($pattern.Value) sectors" "Info"
         }
 
+        # Retrieve leftover data from the compiled engine
+        $leftovers = [DiskAnalysisEngine]::GetLeftovers()
+        $totalLeftoverCount = [DiskAnalysisEngine]::GetTotalLeftoverCount()
+
+        Write-Console "Leftover sectors with potential data: $($totalLeftoverCount.ToString('N0'))" $(if($totalLeftoverCount -gt 0){"Yellow"}else{"SpringGreen"})
+
+        #Retrieve HardwareInfo for SerialNumber
+        Write-Console "_____________________________________________________" "Gray"
+        Write-Console "Retrieve Hardware Info..." "Yellow"
+        $StatusLabel.Text = "Status: Retrieve Hardware Info..."
+        DoEvents
+        $HardwareInfo = Get-HardwareInfo
+
         # Generate Reports
         Write-Console "_____________________________________________________" "Gray"
         Write-Console "Generating Report(s)..." "Yellow"
@@ -307,10 +454,15 @@ function Main-Process {
 
         $htmlContent = New-HtmlReport -Technician $Technician -Results $results -Disk $disk -DiskNumber $DiskNumber `
     -DiskSize $diskSize -TotalSamples $totalSamples -WipedPercent $wipedPercent `
-    -EntropyPercent $entropyPercent -OverallStatus $overallStatus -SectorSize $SectorSize
+    -EntropyPercent $entropyPercent -OverallStatus $overallStatus -SectorSize $SectorSize `
+    -Leftovers $leftovers -TotalLeftoverCount $totalLeftoverCount -ComputerSerial $HardwareInfo.BiosSN
 
         $htmlPath = "$ReportFile.html"
         $pdfPath = "$ReportFile.pdf"
+
+        if (-not (Test-Path $ReportPath)) {
+            mkdir $ReportPath | Out-Null
+        }
 
         if ($ReportFormat -eq "HTML" -or $ReportFormat -eq "Both") {
             $htmlContent | Out-File -FilePath $htmlPath -Encoding UTF8
@@ -396,6 +548,15 @@ function Main-Process {
         [System.Windows.Forms.MessageBox]::Show("An error occurred: $_", "Error", "OK", "Error")
     }
     finally {
+        # Ensure disk stream is always closed
+        if ($diskStream) {
+            try {
+                $diskStream.Close()
+                $diskStream.Dispose()
+            } catch { }
+            $diskStream = $null
+        }
+
         # Re-enable UI
         $StartScan.Enabled = $true
         $CancelScan.Enabled = $false

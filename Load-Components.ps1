@@ -7,7 +7,7 @@
     components to load. This is done to make it easier to update the scipt base and
     if needed to update the component loader.
 .NOTES
-    Version:        1.0
+    Version:        3.26.0116.1143
     Creation Date:  16.01.2026
     Author:         Yannick Morgenthaler
     Company:        JSW
@@ -31,7 +31,13 @@ function Load-Components {
     #======================
     . .\Main.ps1
     . .\Index.ps1
+    . .\Info.ps1
     . .\GUI\GUI.ps1
+
+    #======================
+    # Make Current Directory available
+    #======================
+    $WorkingDirectory = Get-WorkingDirectory
 
     #======================
     # Call GUI

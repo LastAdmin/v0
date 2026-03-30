@@ -1,4 +1,4 @@
-function Convert-HtmlToPdf {
+ function Convert-HtmlToPdf {
     param(
         [string]$HtmlPath,
         [string]$PdfPath
